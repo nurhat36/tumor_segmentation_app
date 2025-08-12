@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:tumor_segmentation_app2/pages/image_list_page.dart';
 import 'services/api_service.dart';
+import 'package:jwt_decoder/jwt_decoder.dart';
 
 void main() {
   runApp(const MyApp());
@@ -31,26 +32,46 @@ class _LoginScreenState extends State<LoginScreen> {
 
   void login() async {
     setState(() => isLoading = true);
-    final loginData = await api.login(usernameController.text, passwordController.text);
-    setState(() => isLoading = false);
-    if (loginData != null) {
-      String token = loginData["token"];
-      String userId = loginData["user_id"].toString();
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Giriş başarılı!")),
+    try {
+      final loginData = await api.login(
+        usernameController.text,
+        passwordController.text,
       );
 
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (context) => ImageListPage(token: token, userId: userId),
-        ),
-      );
-    } else {
+      setState(() => isLoading = false);
+
+      if (loginData != null) {
+        String token = loginData["token"];
+
+        // Token'ı decode et
+        Map<String, dynamic> decodedToken = JwtDecoder.decode(token);
+        int userId = decodedToken['user_id'];
+
+        print('User ID: $userId');
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Giriş başarılı! Kullanıcı ID: $userId")),
+        );
+
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (context) => ImageListPage(token: token, userId: userId),
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Giriş başarısız!")),
+        );
+      }
+    } catch (e) {
+      setState(() => isLoading = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Giriş başarısız!")),
+        SnackBar(content: Text("Bir hata oluştu: $e")),
+
       );
+      print("Bir hata oluştu: $e");
     }
   }
 

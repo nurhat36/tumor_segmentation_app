@@ -34,9 +34,9 @@ class ApiService {
     }
     return null;
   }
-  Future<List<dynamic>> getSegmentedImages(String token, String userId) async {
+  Future<List<dynamic>> getSegmentedImages(String token) async {
     final response = await http.get(
-      Uri.parse('$baseUrl/images?user_id=$userId'),
+      Uri.parse('$baseUrl/my-masks'), // userId göndermeye gerek yok
       headers: {
         "Authorization": "Bearer $token",
       },
@@ -48,4 +48,5 @@ class ApiService {
       throw Exception("Veriler alınamadı: ${response.statusCode}");
     }
   }
+
 }
