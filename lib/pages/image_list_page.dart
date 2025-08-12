@@ -3,7 +3,7 @@ import '../services/api_service.dart';
 
 class ImageListPage extends StatefulWidget {
   final String token;
-  final String userId;
+  final int userId;
 
   const ImageListPage({super.key, required this.token, required this.userId});
 
@@ -18,7 +18,7 @@ class _ImageListPageState extends State<ImageListPage> {
   @override
   void initState() {
     super.initState();
-    imagesFuture = apiService.getSegmentedImages(widget.token, widget.userId);
+    imagesFuture = apiService.getSegmentedImages(widget.token);
   }
 
   @override
