@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import '../services/api_service.dart';
+import 'SegmentPage.dart';
+
 
 class ImageListPage extends StatefulWidget {
   final String token;
@@ -98,6 +100,23 @@ class _ImageListPageState extends State<ImageListPage> {
             ),
         ],
       ),
+
+      // Sağ alt köşede + simgesi
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => SegmentPage(
+                token: widget.token,
+                userId: widget.userId,
+              ),
+            ),
+          );
+        },
+        child: const Icon(Icons.add),
+      ),
+
     );
   }
 }
