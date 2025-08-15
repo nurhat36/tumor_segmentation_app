@@ -38,7 +38,7 @@ class _SegmentPageState extends State<SegmentPage> {
       selectionRect = null;
       maskImagePath = null;
 
-      // Load image for original dimensions
+      // Orijinal resim boyutunu öğren
       final data = await pickedFile.readAsBytes();
       final image = await decodeImageFromList(data);
       setState(() {
@@ -47,34 +47,106 @@ class _SegmentPageState extends State<SegmentPage> {
     }
   }
 
-  Future<void> sendToSegmentAPI(BoxConstraints constraints) async {
-    if (selectedImage == null || selectionRect == null || loadedImage == null) return;
+  /// Ekrandaki resmin gerçek koordinatlarını orijinal resim koordinatlarına çevirir
+  Map<String, double> _calculateScale(BoxConstraints constraints) {
+    if (loadedImage == null) return {"scale": 1.0, "dx": 0, "dy": 0};
 
-    // Ekrandaki boyuta göre orijinal resme ölçekle
-    double scaleX = loadedImage!.width / constraints.maxWidth;
-    double scaleY = loadedImage!.height / constraints.maxHeight;
+    double imgWidth = loadedImage!.width.toDouble();
+    double imgHeight = loadedImage!.height.toDouble();
+    double maxWidth = constraints.maxWidth;
+    double maxHeight = constraints.maxHeight;
+
+    double scale = 1.0;
+    double dx = 0;
+    double dy = 0;
+
+    // BoxFit.contain hesaplama
+    if (imgWidth / imgHeight > maxWidth / maxHeight) {
+      scale = maxWidth / imgWidth;
+      dy = (maxHeight - imgHeight * scale) / 2;
+    } else {
+      scale = maxHeight / imgHeight;
+      dx = (maxWidth - imgWidth * scale) / 2;
+    }
+
+    return {
+      "scale": scale,
+      "dx": dx,
+      "dy": dy,
+    };
+  }
+
+  Future<void> sendToSegmentAPI(BoxConstraints constraints) async {
+    if (selectedImage == null || selectionRect == null || loadedImage == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Lütfen bir resim seçin ve alan belirleyin")),
+      );
+      return;
+    }
+
+    var scaleData = _calculateScale(constraints);
+    double scale = scaleData["scale"]!;
+    double dx = scaleData["dx"]!;
+    double dy = scaleData["dy"]!;
+
+    // Ekran koordinatlarını orijinal resme çevir
+    double x = (selectionRect!.left - dx) / scale;
+    double y = (selectionRect!.top - dy) / scale;
+    double width = selectionRect!.width / scale;
+    double height = selectionRect!.height / scale;
+
+    // Koordinatların resmin sınırlarını aşmasını engelle
+    x = x.clamp(0, loadedImage!.width.toDouble());
+    y = y.clamp(0, loadedImage!.height.toDouble());
+    width = width.clamp(0, loadedImage!.width.toDouble() - x);
+    height = height.clamp(0, loadedImage!.height.toDouble() - y);
+
+    // Debug bilgileri
+    print('--- Seçilen Alan Bilgileri ---');
+    print('Ekrandaki Rect: ${selectionRect!.toString()}');
+    print('Orijinal Resim Boyutu: ${loadedImage!.width}x${loadedImage!.height}');
+    print('Hesaplanan Koordinatlar: x=$x, y=$y, width=$width, height=$height');
+    print('Scale: $scale, dx: $dx, dy: $dy');
+    print('Shape: ${selectedShape.toString().split('.').last}');
+
+    // Eğer width veya height 0 ise işlem yapma
+    if (width <= 0 || height <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Geçersiz seçim alanı")),
+      );
+      return;
+    }
 
     var request = http.MultipartRequest('POST', Uri.parse('$baseUrl/segment'));
     request.headers['Authorization'] = 'Bearer ${widget.token}';
     request.fields['shape'] = selectedShape.toString().split('.').last;
-    request.fields['x'] = (selectionRect!.left * scaleX).toInt().toString();
-    request.fields['y'] = (selectionRect!.top * scaleY).toInt().toString();
-    request.fields['width'] = (selectionRect!.width * scaleX).toInt().toString();
-    request.fields['height'] = (selectionRect!.height * scaleY).toInt().toString();
+    request.fields['x'] = x.round().toString();
+    request.fields['y'] = y.round().toString();
+    request.fields['width'] = width.round().toString();
+    request.fields['height'] = height.round().toString();
     request.files.add(await http.MultipartFile.fromPath('file', selectedImage!.path));
 
-    var response = await request.send();
-
-    if (response.statusCode == 200) {
+    try {
+      var response = await request.send();
       var responseData = await response.stream.bytesToString();
-      var jsonData = json.decode(responseData);
-      String maskUrl = baseUrl + jsonData['mask_url'];
-      setState(() {
-        maskImagePath = maskUrl;
-      });
-    } else {
+
+      print('API Yanıtı: $responseData');
+
+      if (response.statusCode == 200) {
+        var jsonData = json.decode(responseData);
+        String maskUrl = baseUrl + jsonData['mask_url'];
+        setState(() {
+          maskImagePath = maskUrl;
+        });
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Segment işlemi başarısız: ${response.statusCode}")),
+        );
+      }
+    } catch (e) {
+      print('Hata: $e');
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Segment işlemi başarısız: ${response.statusCode}")),
+        SnackBar(content: Text("Hata oluştu: ${e.toString()}")),
       );
     }
   }
