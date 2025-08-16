@@ -29,44 +29,48 @@ class _SegmentPageState extends State<SegmentPage> {
 
   ShapeType selectedShape = ShapeType.rectangle;
   Rect? selectionRect;
+  bool isLoading = false;
 
   Future<void> pickImage() async {
     final picker = ImagePicker();
     final pickedFile = await picker.pickImage(source: ImageSource.gallery);
     if (pickedFile != null) {
-      selectedImage = File(pickedFile.path);
-      selectionRect = null;
-      maskImagePath = null;
+      setState(() {
+        isLoading = true;
+        selectedImage = File(pickedFile.path);
+        selectionRect = null;
+        maskImagePath = null;
+      });
 
-      // Orijinal resim boyutunu öğren
+      // Orijinal resim boyutunu yükle
       final data = await pickedFile.readAsBytes();
       final image = await decodeImageFromList(data);
       setState(() {
         loadedImage = image;
+        isLoading = false;
       });
     }
   }
 
-  /// Ekrandaki resmin gerçek koordinatlarını orijinal resim koordinatlarına çevirir
-  Map<String, double> _calculateScale(BoxConstraints constraints) {
+  Map<String, double> _calculateScale(Size containerSize) {
     if (loadedImage == null) return {"scale": 1.0, "dx": 0, "dy": 0};
 
     double imgWidth = loadedImage!.width.toDouble();
     double imgHeight = loadedImage!.height.toDouble();
-    double maxWidth = constraints.maxWidth;
-    double maxHeight = constraints.maxHeight;
+    double containerWidth = containerSize.width;
+    double containerHeight = containerSize.height;
 
     double scale = 1.0;
     double dx = 0;
     double dy = 0;
 
     // BoxFit.contain hesaplama
-    if (imgWidth / imgHeight > maxWidth / maxHeight) {
-      scale = maxWidth / imgWidth;
-      dy = (maxHeight - imgHeight * scale) / 2;
+    if (imgWidth / imgHeight > containerWidth / containerHeight) {
+      scale = containerWidth / imgWidth;
+      dy = (containerHeight - imgHeight * scale) / 2;
     } else {
-      scale = maxHeight / imgHeight;
-      dx = (maxWidth - imgWidth * scale) / 2;
+      scale = containerHeight / imgHeight;
+      dx = (containerWidth - imgWidth * scale) / 2;
     }
 
     return {
@@ -76,7 +80,7 @@ class _SegmentPageState extends State<SegmentPage> {
     };
   }
 
-  Future<void> sendToSegmentAPI(BoxConstraints constraints) async {
+  Future<void> sendToSegmentAPI(Size containerSize) async {
     if (selectedImage == null || selectionRect == null || loadedImage == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("Lütfen bir resim seçin ve alan belirleyin")),
@@ -84,7 +88,7 @@ class _SegmentPageState extends State<SegmentPage> {
       return;
     }
 
-    var scaleData = _calculateScale(constraints);
+    var scaleData = _calculateScale(containerSize);
     double scale = scaleData["scale"]!;
     double dx = scaleData["dx"]!;
     double dy = scaleData["dy"]!;
@@ -101,14 +105,6 @@ class _SegmentPageState extends State<SegmentPage> {
     width = width.clamp(0, loadedImage!.width.toDouble() - x);
     height = height.clamp(0, loadedImage!.height.toDouble() - y);
 
-    // Debug bilgileri
-    print('--- Seçilen Alan Bilgileri ---');
-    print('Ekrandaki Rect: ${selectionRect!.toString()}');
-    print('Orijinal Resim Boyutu: ${loadedImage!.width}x${loadedImage!.height}');
-    print('Hesaplanan Koordinatlar: x=$x, y=$y, width=$width, height=$height');
-    print('Scale: $scale, dx: $dx, dy: $dy');
-    print('Shape: ${selectedShape.toString().split('.').last}');
-
     // Eğer width veya height 0 ise işlem yapma
     if (width <= 0 || height <= 0) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -117,20 +113,22 @@ class _SegmentPageState extends State<SegmentPage> {
       return;
     }
 
-    var request = http.MultipartRequest('POST', Uri.parse('$baseUrl/segment'));
-    request.headers['Authorization'] = 'Bearer ${widget.token}';
-    request.fields['shape'] = selectedShape.toString().split('.').last;
-    request.fields['x'] = x.round().toString();
-    request.fields['y'] = y.round().toString();
-    request.fields['width'] = width.round().toString();
-    request.fields['height'] = height.round().toString();
-    request.files.add(await http.MultipartFile.fromPath('file', selectedImage!.path));
+    setState(() {
+      isLoading = true;
+    });
 
     try {
+      var request = http.MultipartRequest('POST', Uri.parse('$baseUrl/segment'));
+      request.headers['Authorization'] = 'Bearer ${widget.token}';
+      request.fields['shape'] = selectedShape.toString().split('.').last;
+      request.fields['x'] = x.toString();
+      request.fields['y'] = y.toString();
+      request.fields['width'] = width.toString();
+      request.fields['height'] = height.toString();
+      request.files.add(await http.MultipartFile.fromPath('file', selectedImage!.path));
+
       var response = await request.send();
       var responseData = await response.stream.bytesToString();
-
-      print('API Yanıtı: $responseData');
 
       if (response.statusCode == 200) {
         var jsonData = json.decode(responseData);
@@ -144,10 +142,13 @@ class _SegmentPageState extends State<SegmentPage> {
         );
       }
     } catch (e) {
-      print('Hata: $e');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Hata oluştu: ${e.toString()}")),
       );
+    } finally {
+      setState(() {
+        isLoading = false;
+      });
     }
   }
 
@@ -163,18 +164,21 @@ class _SegmentPageState extends State<SegmentPage> {
           ),
         ],
       ),
-      body: selectedImage == null
+      body: isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : selectedImage == null
           ? const Center(child: Text("Resim seçiniz"))
-          : LayoutBuilder(
-        builder: (context, constraints) {
-          return Column(
-            children: [
-              Expanded(
-                child: GestureDetector(
+          : Column(
+        children: [
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                return GestureDetector(
                   onPanStart: (details) {
                     final localPos = details.localPosition;
                     setState(() {
-                      selectionRect = Rect.fromLTWH(localPos.dx, localPos.dy, 0, 0);
+                      selectionRect = Rect.fromLTWH(
+                          localPos.dx, localPos.dy, 0, 0);
                     });
                   },
                   onPanUpdate: (details) {
@@ -194,103 +198,95 @@ class _SegmentPageState extends State<SegmentPage> {
                   },
                   child: Stack(
                     children: [
-                      Image.file(
-                        selectedImage!,
-                        fit: BoxFit.contain,
-                        width: double.infinity,
-                        height: double.infinity,
+                      Center(
+                        child: FittedBox(
+                          fit: BoxFit.contain,
+                          child: SizedBox(
+                            width: loadedImage?.width.toDouble(),
+                            height: loadedImage?.height.toDouble(),
+                            child: Image.file(selectedImage!),
+                          ),
+                        ),
                       ),
                       if (selectionRect != null)
-                        CustomPaint(
-                          painter: SelectionPainter(selectionRect!, selectedShape),
+                        Positioned(
+                          left: selectionRect!.left,
+                          top: selectionRect!.top,
+                          child: Container(
+                            width: selectionRect!.width,
+                            height: selectionRect!.height,
+                            decoration: BoxDecoration(
+                              border: Border.all(
+                                  color: Colors.blue, width: 2),
+                              color: Colors.blue.withOpacity(0.3),
+                              borderRadius: selectedShape ==
+                                  ShapeType.rectangle
+                                  ? null
+                                  : BorderRadius.circular(
+                                  selectionRect!.shortestSide),
+                            ),
+                          ),
                         ),
                     ],
                   ),
+                );
+              },
+            ),
+          ),
+          Container(
+            height: 80,
+            color: Colors.grey[900],
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.crop_square,
+                      color: Colors.white),
+                  onPressed: () => setState(
+                          () => selectedShape = ShapeType.rectangle),
                 ),
-              ),
-              Container(
-                height: 80,
-                color: Colors.grey[900],
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.crop_square, color: Colors.white),
-                      onPressed: () => setState(() => selectedShape = ShapeType.rectangle),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.circle, color: Colors.white),
-                      onPressed: () => setState(() => selectedShape = ShapeType.circle),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.circle_outlined, color: Colors.white),
-                      onPressed: () => setState(() => selectedShape = ShapeType.oval),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.play_arrow, color: Colors.white),
-                      onPressed: (selectionRect != null)
-                          ? () => sendToSegmentAPI(constraints)
-                          : null,
-                    ),
-                  ],
+                IconButton(
+                  icon:
+                  const Icon(Icons.circle, color: Colors.white),
+                  onPressed: () =>
+                      setState(() => selectedShape = ShapeType.circle),
                 ),
-              ),
-              if (maskImagePath != null)
-                Expanded(
-                  child: Column(
-                    children: [
-                      const SizedBox(height: 10),
-                      const Text("Segment Sonucu"),
-                      Expanded(child: Image.network(maskImagePath!)),
-                    ],
+                IconButton(
+                  icon: const Icon(Icons.circle_outlined,
+                      color: Colors.white),
+                  onPressed: () =>
+                      setState(() => selectedShape = ShapeType.oval),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.play_arrow,
+                      color: Colors.white),
+                  onPressed: () {
+                    if (selectionRect != null) {
+                      final size = MediaQuery.of(context).size;
+                      sendToSegmentAPI(size);
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+          if (maskImagePath != null)
+            Expanded(
+              child: Column(
+                children: [
+                  const SizedBox(height: 10),
+                  const Text("Segment Sonucu"),
+                  Expanded(
+                    child: Image.network(
+                      maskImagePath!,
+                      fit: BoxFit.contain,
+                    ),
                   ),
-                ),
-            ],
-          );
-        },
+                ],
+              ),
+            ),
+        ],
       ),
     );
   }
-}
-
-class SelectionPainter extends CustomPainter {
-  final Rect rect;
-  final ShapeType shape;
-
-  SelectionPainter(this.rect, this.shape);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.blue.withOpacity(0.3)
-      ..style = PaintingStyle.fill;
-
-    switch (shape) {
-      case ShapeType.rectangle:
-        canvas.drawRect(rect, paint);
-        break;
-      case ShapeType.circle:
-      case ShapeType.oval:
-        canvas.drawOval(rect, paint);
-        break;
-    }
-
-    final border = Paint()
-      ..color = Colors.blue
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2;
-
-    switch (shape) {
-      case ShapeType.rectangle:
-        canvas.drawRect(rect, border);
-        break;
-      case ShapeType.circle:
-      case ShapeType.oval:
-        canvas.drawOval(rect, border);
-        break;
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
