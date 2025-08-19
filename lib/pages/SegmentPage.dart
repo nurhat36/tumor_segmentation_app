@@ -1,9 +1,10 @@
 import 'dart:io';
 import 'dart:convert';
+import 'dart:ui' as ui;
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:http/http.dart' as http;
-import 'dart:ui' as ui;
 
 enum ShapeType { rectangle, circle, oval }
 
@@ -24,12 +25,13 @@ class SegmentPage extends StatefulWidget {
 class _SegmentPageState extends State<SegmentPage> {
   File? selectedImage;
   ui.Image? loadedImage;
-  String? maskImagePath;
+  ui.Image? overlayImage;
   final String baseUrl = "http://10.0.2.2:8000";
 
   ShapeType selectedShape = ShapeType.rectangle;
   Rect? selectionRect;
   bool isLoading = false;
+  bool showOverlay = true;
 
   Future<void> pickImage() async {
     final picker = ImagePicker();
@@ -39,10 +41,9 @@ class _SegmentPageState extends State<SegmentPage> {
         isLoading = true;
         selectedImage = File(pickedFile.path);
         selectionRect = null;
-        maskImagePath = null;
+        overlayImage = null;
       });
 
-      // Orijinal resim boyutunu yükle
       final data = await pickedFile.readAsBytes();
       final image = await decodeImageFromList(data);
       setState(() {
@@ -64,7 +65,6 @@ class _SegmentPageState extends State<SegmentPage> {
     double dx = 0;
     double dy = 0;
 
-    // BoxFit.contain hesaplama
     if (imgWidth / imgHeight > containerWidth / containerHeight) {
       scale = containerWidth / imgWidth;
       dy = (containerHeight - imgHeight * scale) / 2;
@@ -80,6 +80,45 @@ class _SegmentPageState extends State<SegmentPage> {
     };
   }
 
+  Future<ui.Image> loadNetworkImage(String path) async {
+    final response = await http.get(Uri.parse(path));
+    final bytes = response.bodyBytes;
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
+    return frame.image;
+  }
+
+  Future<ui.Image> createSimpleOverlay(ui.Image originalImage, ui.Image mask) async {
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    final paint = Paint();
+
+    // Önce orijinal resmi çiz
+    canvas.drawImage(originalImage, Offset.zero, paint);
+
+    // Maskeyi çiz (yarı saydam kırmızı)
+    paint.color = Colors.red.withOpacity(0.3);
+    paint.blendMode = BlendMode.srcOver;
+    canvas.drawImage(mask, Offset.zero, paint);
+
+    // Yeşil kenar çizgisi - basit versiyon
+    paint.color = Colors.green;
+    paint.strokeWidth = 3;
+    paint.style = PaintingStyle.stroke;
+
+    // Maskenin dış çerçevesini çiz
+    canvas.drawRect(
+        Rect.fromPoints(
+            Offset.zero,
+            Offset(mask.width.toDouble(), mask.height.toDouble())
+        ),
+        paint
+    );
+
+    final picture = recorder.endRecording();
+    return await picture.toImage(originalImage.width, originalImage.height);
+  }
+
   Future<void> sendToSegmentAPI(Size containerSize) async {
     if (selectedImage == null || selectionRect == null || loadedImage == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -93,19 +132,16 @@ class _SegmentPageState extends State<SegmentPage> {
     double dx = scaleData["dx"]!;
     double dy = scaleData["dy"]!;
 
-    // Ekran koordinatlarını orijinal resme çevir
     double x = (selectionRect!.left - dx) / scale;
     double y = (selectionRect!.top - dy) / scale;
     double width = selectionRect!.width / scale;
     double height = selectionRect!.height / scale;
 
-    // Koordinatların resmin sınırlarını aşmasını engelle
     x = x.clamp(0, loadedImage!.width.toDouble());
     y = y.clamp(0, loadedImage!.height.toDouble());
     width = width.clamp(0, loadedImage!.width.toDouble() - x);
     height = height.clamp(0, loadedImage!.height.toDouble() - y);
 
-    // Eğer width veya height 0 ise işlem yapma
     if (width <= 0 || height <= 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("Geçersiz seçim alanı")),
@@ -133,15 +169,33 @@ class _SegmentPageState extends State<SegmentPage> {
       if (response.statusCode == 200) {
         var jsonData = json.decode(responseData);
         String maskUrl = baseUrl + jsonData['mask_url'];
-        setState(() {
-          maskImagePath = maskUrl;
-        });
+        print("Mask URL: $maskUrl");
+
+        // Maskeyi yükle
+        final mask = await loadNetworkImage(maskUrl);
+        print("Mask yüklendi: ${mask.width}x${mask.height}");
+
+        // Basit overlay oluştur
+        try {
+          final overlay = await createSimpleOverlay(loadedImage!, mask);
+          print("Overlay oluşturuldu");
+
+          setState(() {
+            overlayImage = overlay;
+          });
+        } catch (e) {
+          print("Overlay oluşturma hatası: $e");
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("Overlay oluşturulamadı: $e")),
+          );
+        }
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text("Segment işlemi başarısız: ${response.statusCode}")),
         );
       }
     } catch (e) {
+      print("API hatası: $e");
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Hata oluştu: ${e.toString()}")),
       );
@@ -162,6 +216,18 @@ class _SegmentPageState extends State<SegmentPage> {
             icon: const Icon(Icons.upload_file),
             onPressed: pickImage,
           ),
+          if (overlayImage != null)
+            IconButton(
+              icon: Icon(
+                showOverlay ? Icons.visibility : Icons.visibility_off,
+                color: Colors.white,
+              ),
+              onPressed: () {
+                setState(() {
+                  showOverlay = !showOverlay;
+                });
+              },
+            ),
         ],
       ),
       body: isLoading
@@ -204,7 +270,9 @@ class _SegmentPageState extends State<SegmentPage> {
                           child: SizedBox(
                             width: loadedImage?.width.toDouble(),
                             height: loadedImage?.height.toDouble(),
-                            child: Image.file(selectedImage!),
+                            child: showOverlay && overlayImage != null
+                                ? RawImage(image: overlayImage)
+                                : Image.file(selectedImage!),
                           ),
                         ),
                       ),
@@ -216,14 +284,11 @@ class _SegmentPageState extends State<SegmentPage> {
                             width: selectionRect!.width,
                             height: selectionRect!.height,
                             decoration: BoxDecoration(
-                              border: Border.all(
-                                  color: Colors.blue, width: 2),
+                              border: Border.all(color: Colors.blue, width: 2),
                               color: Colors.blue.withOpacity(0.3),
-                              borderRadius: selectedShape ==
-                                  ShapeType.rectangle
+                              borderRadius: selectedShape == ShapeType.rectangle
                                   ? null
-                                  : BorderRadius.circular(
-                                  selectionRect!.shortestSide),
+                                  : BorderRadius.circular(selectionRect!.shortestSide),
                             ),
                           ),
                         ),
@@ -240,26 +305,22 @@ class _SegmentPageState extends State<SegmentPage> {
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
                 IconButton(
-                  icon: const Icon(Icons.crop_square,
-                      color: Colors.white),
-                  onPressed: () => setState(
-                          () => selectedShape = ShapeType.rectangle),
+                  icon: Icon(Icons.crop_square,
+                      color: selectedShape == ShapeType.rectangle ? Colors.blue : Colors.white),
+                  onPressed: () => setState(() => selectedShape = ShapeType.rectangle),
                 ),
                 IconButton(
-                  icon:
-                  const Icon(Icons.circle, color: Colors.white),
-                  onPressed: () =>
-                      setState(() => selectedShape = ShapeType.circle),
+                  icon: Icon(Icons.circle,
+                      color: selectedShape == ShapeType.circle ? Colors.blue : Colors.white),
+                  onPressed: () => setState(() => selectedShape = ShapeType.circle),
                 ),
                 IconButton(
-                  icon: const Icon(Icons.circle_outlined,
-                      color: Colors.white),
-                  onPressed: () =>
-                      setState(() => selectedShape = ShapeType.oval),
+                  icon: Icon(Icons.circle_outlined,
+                      color: selectedShape == ShapeType.oval ? Colors.blue : Colors.white),
+                  onPressed: () => setState(() => selectedShape = ShapeType.oval),
                 ),
                 IconButton(
-                  icon: const Icon(Icons.play_arrow,
-                      color: Colors.white),
+                  icon: const Icon(Icons.play_arrow, color: Colors.white),
                   onPressed: () {
                     if (selectionRect != null) {
                       final size = MediaQuery.of(context).size;
@@ -270,21 +331,6 @@ class _SegmentPageState extends State<SegmentPage> {
               ],
             ),
           ),
-          if (maskImagePath != null)
-            Expanded(
-              child: Column(
-                children: [
-                  const SizedBox(height: 10),
-                  const Text("Segment Sonucu"),
-                  Expanded(
-                    child: Image.network(
-                      maskImagePath!,
-                      fit: BoxFit.contain,
-                    ),
-                  ),
-                ],
-              ),
-            ),
         ],
       ),
     );
