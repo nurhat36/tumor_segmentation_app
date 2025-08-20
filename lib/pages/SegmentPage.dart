@@ -144,7 +144,7 @@ class _SegmentPageState extends State<SegmentPage> {
 
     if (width <= 0 || height <= 0) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Geçersiz seçim alanı")),
+        const SnackBar(content: Text("Geçersiz seçim alanı.")),
       );
       return;
     }
