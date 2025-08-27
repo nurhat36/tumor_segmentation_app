@@ -97,7 +97,11 @@ class _SegmentPageState extends State<SegmentPage> {
   Future<void> _segmentFromSelection() async {
     if (selectionRectImage == null) {
       ScaffoldMessenger.of(context).showSnackBar(
+
         const SnackBar(content: Text("Önce bir alan seçin.")),
+
+        const SnackBar(content: Text("Geçersiz seçim alanı")),
+
       );
       return;
     }
