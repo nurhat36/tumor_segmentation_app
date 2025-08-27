@@ -1,10 +1,8 @@
 import 'dart:io';
-import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:http/http.dart' as http;
 
 enum ShapeType { rectangle, circle, oval }
 
@@ -13,199 +11,116 @@ class SegmentPage extends StatefulWidget {
   final int userId;
 
   const SegmentPage({
-    Key? key,
+    super.key,
     required this.token,
     required this.userId,
-  }) : super(key: key);
+  });
 
   @override
   State<SegmentPage> createState() => _SegmentPageState();
 }
 
 class _SegmentPageState extends State<SegmentPage> {
+  // Görsel
   File? selectedImage;
   ui.Image? loadedImage;
-  ui.Image? overlayImage;
-  final String baseUrl = "http://10.0.2.2:8000";
 
-  ShapeType selectedShape = ShapeType.rectangle;
-  Rect? selectionRect;
+  // UI durumları
   bool isLoading = false;
+  bool editMode = false; // kırmızı noktalar aktif/pasif
   bool showOverlay = true;
+  ShapeType selectedShape = ShapeType.rectangle;
 
+  // Seçim / çokgen verileri (HEP "görüntü uzayı"nda saklanır!)
+  Rect? selectionRectImage;           // ilk dikdörtgen seçim (image space)
+  List<Offset> pointsImage = [];      // çokgen noktaları (image space)
+
+  // ----- Yardımcı: görüntüyü yükle -----
   Future<void> pickImage() async {
     final picker = ImagePicker();
-    final pickedFile = await picker.pickImage(source: ImageSource.gallery);
-    if (pickedFile != null) {
-      setState(() {
-        isLoading = true;
-        selectedImage = File(pickedFile.path);
-        selectionRect = null;
-        overlayImage = null;
-      });
-
-      final data = await pickedFile.readAsBytes();
-      final image = await decodeImageFromList(data);
-      setState(() {
-        loadedImage = image;
-        isLoading = false;
-      });
-    }
-  }
-
-  Map<String, double> _calculateScale(Size containerSize) {
-    if (loadedImage == null) return {"scale": 1.0, "dx": 0, "dy": 0};
-
-    double imgWidth = loadedImage!.width.toDouble();
-    double imgHeight = loadedImage!.height.toDouble();
-    double containerWidth = containerSize.width;
-    double containerHeight = containerSize.height;
-
-    double scale = 1.0;
-    double dx = 0;
-    double dy = 0;
-
-    if (imgWidth / imgHeight > containerWidth / containerHeight) {
-      scale = containerWidth / imgWidth;
-      dy = (containerHeight - imgHeight * scale) / 2;
-    } else {
-      scale = containerHeight / imgHeight;
-      dx = (containerWidth - imgWidth * scale) / 2;
-    }
-
-    return {
-      "scale": scale,
-      "dx": dx,
-      "dy": dy,
-    };
-  }
-
-  Future<ui.Image> loadNetworkImage(String path) async {
-    final response = await http.get(Uri.parse(path));
-    final bytes = response.bodyBytes;
-    final codec = await ui.instantiateImageCodec(bytes);
-    final frame = await codec.getNextFrame();
-    return frame.image;
-  }
-
-  Future<ui.Image> createSimpleOverlay(ui.Image originalImage, ui.Image mask) async {
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
-    final paint = Paint();
-
-    // Önce orijinal resmi çiz
-    canvas.drawImage(originalImage, Offset.zero, paint);
-
-    // Maskeyi çiz (yarı saydam kırmızı)
-    paint.color = Colors.red.withOpacity(0.3);
-    paint.blendMode = BlendMode.srcOver;
-    canvas.drawImage(mask, Offset.zero, paint);
-
-    // Yeşil kenar çizgisi - basit versiyon
-    paint.color = Colors.green;
-    paint.strokeWidth = 3;
-    paint.style = PaintingStyle.stroke;
-
-    // Maskenin dış çerçevesini çiz
-    canvas.drawRect(
-        Rect.fromPoints(
-            Offset.zero,
-            Offset(mask.width.toDouble(), mask.height.toDouble())
-        ),
-        paint
-    );
-
-    final picture = recorder.endRecording();
-    return await picture.toImage(originalImage.width, originalImage.height);
-  }
-
-  Future<void> sendToSegmentAPI(Size containerSize) async {
-    if (selectedImage == null || selectionRect == null || loadedImage == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Lütfen bir resim seçin ve alan belirleyin")),
-      );
-      return;
-    }
-
-    var scaleData = _calculateScale(containerSize);
-    double scale = scaleData["scale"]!;
-    double dx = scaleData["dx"]!;
-    double dy = scaleData["dy"]!;
-
-    double x = (selectionRect!.left - dx) / scale;
-    double y = (selectionRect!.top - dy) / scale;
-    double width = selectionRect!.width / scale;
-    double height = selectionRect!.height / scale;
-
-    x = x.clamp(0, loadedImage!.width.toDouble());
-    y = y.clamp(0, loadedImage!.height.toDouble());
-    width = width.clamp(0, loadedImage!.width.toDouble() - x);
-    height = height.clamp(0, loadedImage!.height.toDouble() - y);
-
-    if (width <= 0 || height <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Geçersiz seçim alanı")),
-      );
-      return;
-    }
+    final picked = await picker.pickImage(source: ImageSource.gallery);
+    if (picked == null) return;
 
     setState(() {
       isLoading = true;
+      selectedImage = File(picked.path);
+      selectionRectImage = null;
+      pointsImage.clear();
+      editMode = false;
     });
 
-    try {
-      var request = http.MultipartRequest('POST', Uri.parse('$baseUrl/segment'));
-      request.headers['Authorization'] = 'Bearer ${widget.token}';
-      request.fields['shape'] = selectedShape.toString().split('.').last;
-      request.fields['x'] = x.toString();
-      request.fields['y'] = y.toString();
-      request.fields['width'] = width.toString();
-      request.fields['height'] = height.toString();
-      request.files.add(await http.MultipartFile.fromPath('file', selectedImage!.path));
+    final bytes = await picked.readAsBytes();
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
 
-      var response = await request.send();
-      var responseData = await response.stream.bytesToString();
-
-      if (response.statusCode == 200) {
-        var jsonData = json.decode(responseData);
-        String maskUrl = baseUrl + jsonData['mask_url'];
-        print("Mask URL: $maskUrl");
-
-        // Maskeyi yükle
-        final mask = await loadNetworkImage(maskUrl);
-        print("Mask yüklendi: ${mask.width}x${mask.height}");
-
-        // Basit overlay oluştur
-        try {
-          final overlay = await createSimpleOverlay(loadedImage!, mask);
-          print("Overlay oluşturuldu");
-
-          setState(() {
-            overlayImage = overlay;
-          });
-        } catch (e) {
-          print("Overlay oluşturma hatası: $e");
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Overlay oluşturulamadı: $e")),
-          );
-        }
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Segment işlemi başarısız: ${response.statusCode}")),
-        );
-      }
-    } catch (e) {
-      print("API hatası: $e");
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Hata oluştu: ${e.toString()}")),
-      );
-    } finally {
-      setState(() {
-        isLoading = false;
-      });
-    }
+    setState(() {
+      loadedImage = frame.image;
+      isLoading = false;
+    });
   }
 
+  // ----- LayoutBuilder alanına göre ölçek/ofset -----
+  // BoxFit.contain ile resmi sığdırmak için gereken scale & offset
+  ({double scale, Offset offset}) _fit(Size box) {
+    final w = loadedImage!.width.toDouble();
+    final h = loadedImage!.height.toDouble();
+    final s = math.min(box.width / w, box.height / h);
+    final dx = (box.width - w * s) / 2.0;
+    final dy = (box.height - h * s) / 2.0;
+    return (scale: s, offset: Offset(dx, dy));
+  }
+
+  // Ekran (canvas) <-> Görüntü (image) koordinat dönüşümleri
+  Offset _canvasToImage(Offset canvasPos, double scale, Offset off) {
+    return Offset((canvasPos.dx - off.dx) / scale, (canvasPos.dy - off.dy) / scale);
+  }
+
+  Offset _imageToCanvas(Offset imgPos, double scale, Offset off) {
+    return Offset(imgPos.dx * scale + off.dx, imgPos.dy * scale + off.dy);
+  }
+
+  // ----- İlk dikdörtgenden 12 noktalı oval çokgen üret -----
+  List<Offset> _ovalPointsFromRect(Rect r, {int count = 12}) {
+    final cx = r.center.dx;
+    final cy = r.center.dy;
+    final rx = r.width / 2.0;
+    final ry = r.height / 2.0;
+    final pts = <Offset>[];
+    for (int i = 0; i < count; i++) {
+      final t = (2 * math.pi) * (i / count);
+      pts.add(Offset(cx + rx * math.cos(t), cy + ry * math.sin(t)));
+    }
+    return pts;
+  }
+
+  // ----- Segment (stub): dikdörtgeni çokgene çevir -----
+  Future<void> _segmentFromSelection() async {
+    if (selectionRectImage == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+
+        const SnackBar(content: Text("Önce bir alan seçin.")),
+
+        const SnackBar(content: Text("Geçersiz seçim alanı")),
+
+      );
+      return;
+    }
+    setState(() {
+      pointsImage = _ovalPointsFromRect(selectionRectImage!, count: 12);
+      editMode = false; // önce göster, istenirse sonra düzenle
+    });
+  }
+
+  // ----- Noktaların sürüklenmesi sırasında görüntü sınırına hapset -----
+  Offset _clampToImage(Offset p) {
+    final w = loadedImage!.width.toDouble();
+    final h = loadedImage!.height.toDouble();
+    final x = p.dx.clamp(0.0, w);
+    final y = p.dy.clamp(0.0, h);
+    return Offset(x, y);
+  }
+
+  // ----- UI -----
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -215,124 +130,206 @@ class _SegmentPageState extends State<SegmentPage> {
           IconButton(
             icon: const Icon(Icons.upload_file),
             onPressed: pickImage,
+            tooltip: "Resim seç",
           ),
-          if (overlayImage != null)
+          if (pointsImage.isNotEmpty)
             IconButton(
-              icon: Icon(
-                showOverlay ? Icons.visibility : Icons.visibility_off,
-                color: Colors.white,
-              ),
+              icon: const Icon(Icons.save),
+              tooltip: "Kaydet",
               onPressed: () {
-                setState(() {
-                  showOverlay = !showOverlay;
-                });
+                // Burada polygonu dosyaya/servise kaydetme eklenebilir
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("Segmente edilen alan kaydedildi (örnek).")),
+                );
               },
+            ),
+          if (pointsImage.isNotEmpty)
+            IconButton(
+              icon: Icon(editMode ? Icons.check : Icons.edit),
+              tooltip: editMode ? "Düzenlemeyi bitir" : "Düzenle",
+              onPressed: () => setState(() => editMode = !editMode),
             ),
         ],
       ),
       body: isLoading
           ? const Center(child: CircularProgressIndicator())
-          : selectedImage == null
-          ? const Center(child: Text("Resim seçiniz"))
-          : Column(
-        children: [
-          Expanded(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                return GestureDetector(
+          : loadedImage == null
+          ? const Center(child: Text("Üstteki yükle ikonuyla resim seçiniz"))
+          : LayoutBuilder(
+        builder: (context, constraints) {
+          final fit = _fit(Size(constraints.maxWidth, constraints.maxHeight - 80)); // alt bar payı
+          final imgW = loadedImage!.width.toDouble();
+          final imgH = loadedImage!.height.toDouble();
+          final drawW = imgW * fit.scale;
+          final drawH = imgH * fit.scale;
+
+          return Column(
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  // İlk dikdörtgen seçimi (image space olarak tutulur)
                   onPanStart: (details) {
-                    final localPos = details.localPosition;
+                    if (editMode) return; // editte dikdörtgenle işimiz yok
+                    final pImg = _canvasToImage(details.localPosition, fit.scale, fit.offset);
+                    if (pImg.dx < 0 || pImg.dy < 0 || pImg.dx > imgW || pImg.dy > imgH) return;
                     setState(() {
-                      selectionRect = Rect.fromLTWH(
-                          localPos.dx, localPos.dy, 0, 0);
+                      selectionRectImage = Rect.fromLTWH(pImg.dx, pImg.dy, 0, 0);
+                      pointsImage.clear(); // yeni seçim, eski polygonu temizle
                     });
                   },
                   onPanUpdate: (details) {
-                    final localPos = details.localPosition;
+                    if (editMode) return;
+                    if (selectionRectImage == null) return;
+                    final pImg = _canvasToImage(details.localPosition, fit.scale, fit.offset);
+                    // clamp
+                    final x = pImg.dx.clamp(0.0, imgW);
+                    final y = pImg.dy.clamp(0.0, imgH);
+                    final left = selectionRectImage!.left;
+                    final top  = selectionRectImage!.top;
+                    final w = (x - left);
+                    final h = (y - top);
                     setState(() {
-                      final left = selectionRect!.left;
-                      final top = selectionRect!.top;
-                      final width = localPos.dx - left;
-                      final height = localPos.dy - top;
-                      selectionRect = Rect.fromLTWH(
-                        width >= 0 ? left : localPos.dx,
-                        height >= 0 ? top : localPos.dy,
-                        width.abs(),
-                        height.abs(),
+                      selectionRectImage = Rect.fromLTWH(
+                        w >= 0 ? left : x,
+                        h >= 0 ? top  : y,
+                        w.abs(),
+                        h.abs(),
                       );
                     });
                   },
                   child: Stack(
                     children: [
-                      Center(
-                        child: FittedBox(
-                          fit: BoxFit.contain,
-                          child: SizedBox(
-                            width: loadedImage?.width.toDouble(),
-                            height: loadedImage?.height.toDouble(),
-                            child: showOverlay && overlayImage != null
-                                ? RawImage(image: overlayImage)
-                                : Image.file(selectedImage!),
-                          ),
-                        ),
+                      // Resim (BoxFit.contain ile elde edilen alan)
+                      Positioned(
+                        left: fit.offset.dx,
+                        top: fit.offset.dy,
+                        width: drawW,
+                        height: drawH,
+                        child: RawImage(image: loadedImage, fit: BoxFit.fill),
                       ),
-                      if (selectionRect != null)
+
+                      // Seçim dikdörtgeni (yeşil hat İSTENMİYORSA bu kısmı kaldırabilirsin)
+                      if (selectionRectImage != null && pointsImage.isEmpty)
                         Positioned(
-                          left: selectionRect!.left,
-                          top: selectionRect!.top,
+                          left: fit.offset.dx + selectionRectImage!.left * fit.scale,
+                          top:  fit.offset.dy + selectionRectImage!.top  * fit.scale,
+                          width:  selectionRectImage!.width  * fit.scale,
+                          height: selectionRectImage!.height * fit.scale,
                           child: Container(
-                            width: selectionRect!.width,
-                            height: selectionRect!.height,
                             decoration: BoxDecoration(
                               border: Border.all(color: Colors.blue, width: 2),
-                              color: Colors.blue.withOpacity(0.3),
-                              borderRadius: selectedShape == ShapeType.rectangle
-                                  ? null
-                                  : BorderRadius.circular(selectionRect!.shortestSide),
+                              color: Colors.blue.withOpacity(0.25),
                             ),
                           ),
                         ),
+
+                      // Çokgen yeşil hat (her zaman image->canvas dönüşümüyle çizilir)
+                      if (pointsImage.isNotEmpty && showOverlay)
+                        Positioned(
+                          left: fit.offset.dx,
+                          top: fit.offset.dy,
+                          width: drawW,
+                          height: drawH,
+                          child: CustomPaint(
+                            painter: _PolygonPainter(
+                              pointsImage,
+                              fit.scale,
+                            ),
+                          ),
+                        ),
+
+                      // Düzenleme modunda kırmızı noktalar (canvas pozisyonunda)
+                      if (editMode && pointsImage.isNotEmpty)
+                        ...pointsImage.asMap().entries.map((e) {
+                          final i = e.key;
+                          final canvasPos = _imageToCanvas(e.value, fit.scale, fit.offset);
+                          return Positioned(
+                            left: canvasPos.dx - 10,
+                            top:  canvasPos.dy - 10,
+                            child: GestureDetector(
+                              onPanUpdate: (d) {
+                                setState(() {
+                                  // delta canvas -> image
+                                  final deltaImg = Offset(d.delta.dx / fit.scale, d.delta.dy / fit.scale);
+                                  pointsImage[i] = _clampToImage(pointsImage[i] + deltaImg);
+                                });
+                              },
+                              child: Container(
+                                width: 20, height: 20,
+                                decoration: const BoxDecoration(
+                                  color: Colors.red, shape: BoxShape.circle,
+                                ),
+                              ),
+                            ),
+                          );
+                        }).toList(),
                     ],
                   ),
-                );
-              },
-            ),
-          ),
-          Container(
-            height: 80,
-            color: Colors.grey[900],
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: [
-                IconButton(
-                  icon: Icon(Icons.crop_square,
-                      color: selectedShape == ShapeType.rectangle ? Colors.blue : Colors.white),
-                  onPressed: () => setState(() => selectedShape = ShapeType.rectangle),
                 ),
-                IconButton(
-                  icon: Icon(Icons.circle,
-                      color: selectedShape == ShapeType.circle ? Colors.blue : Colors.white),
-                  onPressed: () => setState(() => selectedShape = ShapeType.circle),
+              ),
+
+              // Alt bar
+              Container(
+                height: 80,
+                color: Colors.grey[900],
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.play_arrow, color: Colors.white),
+                      tooltip: "Segment (seçili kutudan çokgen üret)",
+                      onPressed: _segmentFromSelection,
+                    ),
+                    IconButton(
+                      icon: Icon(showOverlay ? Icons.visibility : Icons.visibility_off, color: Colors.white),
+                      tooltip: showOverlay ? "Örtüyü gizle" : "Örtüyü göster",
+                      onPressed: () => setState(() => showOverlay = !showOverlay),
+                    ),
+                  ],
                 ),
-                IconButton(
-                  icon: Icon(Icons.circle_outlined,
-                      color: selectedShape == ShapeType.oval ? Colors.blue : Colors.white),
-                  onPressed: () => setState(() => selectedShape = ShapeType.oval),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.play_arrow, color: Colors.white),
-                  onPressed: () {
-                    if (selectionRect != null) {
-                      final size = MediaQuery.of(context).size;
-                      sendToSegmentAPI(size);
-                    }
-                  },
-                ),
-              ],
-            ),
-          ),
-        ],
+              ),
+            ],
+          );
+        },
       ),
     );
+  }
+}
+
+// ----- Yeşil hat çizen CustomPainter -----
+// points: image-space, painter içinde scale ile canvas'a taşınır.
+class _PolygonPainter extends CustomPainter {
+  final List<Offset> pointsImage;
+  final double scale;
+
+  _PolygonPainter(this.pointsImage, this.scale);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (pointsImage.isEmpty) return;
+
+    final path = Path();
+    // image-space -> painter'ın local canvas space (0,0) zaten image'in sol-üstüne hizalı
+    for (int i = 0; i < pointsImage.length; i++) {
+      final p = pointsImage[i] * scale; // ölçekle
+      if (i == 0) {
+        path.moveTo(p.dx, p.dy);
+      } else {
+        path.lineTo(p.dx, p.dy);
+      }
+    }
+    path.close();
+
+    final paint = Paint()
+      ..color = Colors.green
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3;
+
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _PolygonPainter oldDelegate) {
+    return oldDelegate.pointsImage != pointsImage || oldDelegate.scale != scale;
   }
 }
