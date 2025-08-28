@@ -48,5 +48,16 @@ class ApiService {
       throw Exception("Veriler alınamadı: ${response.statusCode}");
     }
   }
+  Future<void> deleteSegmentedImage(String token, int id) async {
+    final url = Uri.parse("$baseUrl/segment/$id");
+    final response = await http.delete(
+      url,
+      headers: {"Authorization": "Bearer $token"},
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception("Silinemedi: ${response.body}");
+    }
+  }
 
 }
