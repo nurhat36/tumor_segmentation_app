@@ -73,12 +73,12 @@ class _SegmentPageState extends State<SegmentPage> {
 
     setState(() {
       maskImage = frame.image;
-      _findMaskContours();
+      _findSimplifiedContour();
     });
   }
 
-  // ----- Maskenin beyaz alanlarının konturlarını bul -----
-  void _findMaskContours() async {
+  // ----- Maskenin beyaz alanlarının konturlarını bul (Geliştirilmiş versiyon) -----
+  void _findSimplifiedContour() async {
     maskContours.clear();
 
     if (maskImage == null) return;
@@ -91,47 +91,87 @@ class _SegmentPageState extends State<SegmentPage> {
       final height = maskImage!.height;
       final pixels = byteData.buffer.asUint8List();
 
-      // Basit kenar tespiti - sadece sınır piksellerini bul
-      final edgePixels = <Offset>[];
+      final edgePoints = <Offset>{};
+      final visited = List.generate(width * height, (_) => false);
 
-      for (int y = 1; y < height - 1; y++) {
-        for (int x = 1; x < width - 1; x++) {
-          final index = y * width + x;
-          final pixelValue = pixels[index * 4];
+      // Beyaz piksel olup olmadığını kontrol eden yardımcı fonksiyon
+      bool isWhite(int x, int y) {
+        if (x < 0 || x >= width || y < 0 || y >= height) return false;
+        final index = y * width + x;
+        return pixels[index * 4] > 200;
+      }
 
-          // Beyaz piksel ve kenarda mı kontrol et
-          if (pixelValue > 200) {
-            // Komşu pikselleri kontrol et
-            bool isEdge = false;
-            for (int dy = -1; dy <= 1; dy++) {
-              for (int dx = -1; dx <= 1; dx++) {
-                if (dx == 0 && dy == 0) continue;
-
-                final nx = x + dx;
-                final ny = y + dy;
-                final nIndex = ny * width + nx;
-
-                if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                  final neighborValue = pixels[nIndex * 4];
-                  if (neighborValue < 200) {
-                    isEdge = true;
-                    break;
-                  }
-                }
-              }
-              if (isEdge) break;
-            }
-
-            if (isEdge) {
-              edgePixels.add(Offset(x.toDouble(), y.toDouble()));
-            }
+      // Basit bir kontur takibi algoritması ile bir yol oluştur
+      Offset? startPoint;
+      // Başlangıç noktasını bul
+      for (int y = 0; y < height && startPoint == null; y++) {
+        for (int x = 0; x < width && startPoint == null; x++) {
+          if (isWhite(x, y)) {
+            startPoint = Offset(x.toDouble(), y.toDouble());
           }
         }
       }
 
-      // Kenar piksellerini grupla (basitleştirilmiş)
-      if (edgePixels.isNotEmpty) {
-        maskContours = [edgePixels];
+      if (startPoint == null) return;
+
+      final currentPath = <Offset>[startPoint];
+      Offset currentPoint = startPoint;
+      int maxIterations = width * height * 2;
+      int i = 0;
+
+      // "Marching Squares" benzeri basit bir yol takibi
+      while (i < maxIterations) {
+        bool moved = false;
+        for (int dy = -1; dy <= 1; dy++) {
+          for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+
+            final nextX = currentPoint.dx.round() + dx;
+            final nextY = currentPoint.dy.round() + dy;
+            final nextPoint = Offset(nextX.toDouble(), nextY.toDouble());
+
+            // Beyaz bir komşu piksel ve henüz ziyaret edilmemiş mi?
+            if (isWhite(nextX, nextY) && !visited[nextY * width + nextX]) {
+              // Kenarda mı kontrol et
+              bool isEdge = false;
+              for (int ndy = -1; ndy <= 1; ndy++) {
+                for (int ndx = -1; ndx <= 1; ndx++) {
+                  if (ndx == 0 && ndy == 0) continue;
+                  if (!isWhite(nextX + ndx, nextY + ndy)) {
+                    isEdge = true;
+                    break;
+                  }
+                }
+                if (isEdge) break;
+              }
+
+              if (isEdge) {
+                currentPoint = nextPoint;
+                currentPath.add(currentPoint);
+                visited[currentPoint.dy.round() * width + currentPoint.dx.round()] = true;
+                moved = true;
+                break;
+              }
+            }
+          }
+          if (moved) break;
+        }
+        if (!moved) break;
+        i++;
+      }
+
+      // Konturu basitleştir - her N noktada bir nokta al
+      final simplifiedContour = <Offset>[];
+      final samplingRate = 20; // Bu değeri deneyerek istediğiniz sıklığı bulun
+      for (int i = 0; i < currentPath.length; i += samplingRate) {
+        simplifiedContour.add(currentPath[i]);
+      }
+      if (simplifiedContour.isNotEmpty && currentPath.isNotEmpty && !simplifiedContour.contains(currentPath.last)) {
+        simplifiedContour.add(currentPath.last);
+      }
+
+      if (simplifiedContour.isNotEmpty) {
+        maskContours = [simplifiedContour];
       }
 
       setState(() {});
@@ -401,13 +441,15 @@ class _MaskOutlinePainter extends CustomPainter {
     // Nokta paint - kırmızı dolgulu noktalar
     final dotPaint = Paint()
       ..color = Colors.red
-      ..style = PaintingStyle.fill;
+      ..style = PaintingStyle.fill
+      ..strokeWidth=0.1;
+
 
     // Köşe noktası paint - yeşil dış çizgili noktalar
     final cornerDotPaint = Paint()
       ..color = Colors.green
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.0;
+      ..strokeWidth = 0.1;
 
     for (final contour in contours) {
       if (contour.length < 2) continue;
