@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
 import '../services/api_service.dart';
+import 'EditSegmentPage.dart';
 import 'SegmentPage.dart';
+import 'dart:async';  // Completer için
+import 'dart:ui' as ui;  // ui.Image için
+
 
 class ImageListPage extends StatefulWidget {
   final String token;
@@ -199,13 +203,30 @@ class _ImageListPageState extends State<ImageListPage> {
                     ElevatedButton.icon(
                       onPressed: isDeleting
                           ? null
-                          : () {
+                          : () async {
+                        if (selectedImageUrl == null) return;
+
+                        // Flutter'ın ui.Image tipine dönüştürmek için
+                        final networkImage = NetworkImage(selectedImageUrl!);
+                        final completer = Completer<ui.Image>();
+                        networkImage.resolve(const ImageConfiguration()).addListener(
+                          ImageStreamListener((info, _) {
+                            completer.complete(info.image);
+                          }),
+                        );
+                        final uiImage = await completer.future;
+
+                        // Örnek: initialContour boş liste olabilir (henüz düzenleme yapılmadıysa)
+                        final initialContour = <Offset>[];
+
                         Navigator.push(
                           context,
                           MaterialPageRoute(
-                            builder: (context) => SegmentPage(
+                            builder: (context) => EditSegmentPage(
+                              image: uiImage,
+                              initialContour: initialContour,
+                              maskId: selectedImageId!,
                               token: widget.token,
-                              userId: widget.userId,
                             ),
                           ),
                         );
@@ -213,6 +234,7 @@ class _ImageListPageState extends State<ImageListPage> {
                       icon: const Icon(Icons.edit),
                       label: const Text("Düzenle"),
                     ),
+
                     const SizedBox(width: 8),
                     ElevatedButton.icon(
                       style: ElevatedButton.styleFrom(
