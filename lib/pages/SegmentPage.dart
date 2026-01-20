@@ -7,6 +7,9 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:http/http.dart' as http;
 
+// EditSegmentPage dosyanızın doğru import edildiğinden emin olun
+import 'EditSegmentPage.dart';
+
 enum ShapeType { rectangle, circle, oval }
 
 class SegmentPage extends StatefulWidget {
@@ -77,7 +80,7 @@ class _SegmentPageState extends State<SegmentPage> {
     });
   }
 
-  // ----- Maskenin beyaz alanlarının konturlarını bul (Geliştirilmiş versiyon) -----
+  // ----- Maskenin beyaz alanlarının konturlarını bul -----
   void _findSimplifiedContour() async {
     maskContours.clear();
 
@@ -91,7 +94,6 @@ class _SegmentPageState extends State<SegmentPage> {
       final height = maskImage!.height;
       final pixels = byteData.buffer.asUint8List();
 
-      final edgePoints = <Offset>{};
       final visited = List.generate(width * height, (_) => false);
 
       // Beyaz piksel olup olmadığını kontrol eden yardımcı fonksiyon
@@ -103,7 +105,6 @@ class _SegmentPageState extends State<SegmentPage> {
 
       // Basit bir kontur takibi algoritması ile bir yol oluştur
       Offset? startPoint;
-      // Başlangıç noktasını bul
       for (int y = 0; y < height && startPoint == null; y++) {
         for (int x = 0; x < width && startPoint == null; x++) {
           if (isWhite(x, y)) {
@@ -119,7 +120,6 @@ class _SegmentPageState extends State<SegmentPage> {
       int maxIterations = width * height * 2;
       int i = 0;
 
-      // "Marching Squares" benzeri basit bir yol takibi
       while (i < maxIterations) {
         bool moved = false;
         for (int dy = -1; dy <= 1; dy++) {
@@ -130,9 +130,7 @@ class _SegmentPageState extends State<SegmentPage> {
             final nextY = currentPoint.dy.round() + dy;
             final nextPoint = Offset(nextX.toDouble(), nextY.toDouble());
 
-            // Beyaz bir komşu piksel ve henüz ziyaret edilmemiş mi?
             if (isWhite(nextX, nextY) && !visited[nextY * width + nextX]) {
-              // Kenarda mı kontrol et
               bool isEdge = false;
               for (int ndy = -1; ndy <= 1; ndy++) {
                 for (int ndx = -1; ndx <= 1; ndx++) {
@@ -160,9 +158,8 @@ class _SegmentPageState extends State<SegmentPage> {
         i++;
       }
 
-      // Konturu basitleştir - her N noktada bir nokta al
       final simplifiedContour = <Offset>[];
-      final samplingRate = 20; // Bu değeri deneyerek istediğiniz sıklığı bulun
+      final samplingRate = 50;
       for (int i = 0; i < currentPath.length; i += samplingRate) {
         simplifiedContour.add(currentPath[i]);
       }
@@ -214,31 +211,16 @@ class _SegmentPageState extends State<SegmentPage> {
       request.headers['Authorization'] = 'Bearer ${widget.token}';
       request.files.add(await http.MultipartFile.fromPath('file', selectedImage!.path));
 
-      // FLOAT değerleri string olarak gönder (FastAPI otomatik convert eder)
       request.fields.addAll({
-        'x': selectionRectImage!.left.toString(),       // String -> float
-        'y': selectionRectImage!.top.toString(),        // String -> float
-        'width': selectionRectImage!.width.toString(),  // String -> float
-        'height': selectionRectImage!.height.toString(),// String -> float
-        'shape': selectedShape.toString().split('.').last, // String
+        'x': selectionRectImage!.left.toString(),
+        'y': selectionRectImage!.top.toString(),
+        'width': selectionRectImage!.width.toString(),
+        'height': selectionRectImage!.height.toString(),
+        'shape': selectedShape.toString().split('.').last,
       });
-
 
       var response = await request.send();
       final responseBody = await http.Response.fromStream(response);
-      // İstekten önce parametreleri kontrol et
-      print('Gönderilen parametreler:');
-      print('x: ${selectionRectImage!.left}');
-      print('y: ${selectionRectImage!.top}');
-      print('width: ${selectionRectImage!.width}');
-      print('height: ${selectionRectImage!.height}');
-      print('shape: ${selectedShape.toString().split('.').last}');
-
-// Response'u daha detaylı logla
-      if (response.statusCode != 200) {
-        print('API Hatası: ${response.statusCode}');
-        print('Response: ${responseBody.body}');
-      }
 
       if (response.statusCode == 200) {
         final responseData = json.decode(responseBody.body);
@@ -253,9 +235,10 @@ class _SegmentPageState extends State<SegmentPage> {
           );
         }
       } else {
-        // HTTP hata kodlarını kontrol et
         print('HTTP Hatası: ${response.statusCode}');
-        print('Response Body: ${responseBody.body}');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Hata oluştu: ${response.statusCode}")),
+        );
       }
     } catch (e) {
       print('İstek Hatası: $e');
@@ -266,6 +249,87 @@ class _SegmentPageState extends State<SegmentPage> {
       setState(() {
         isSegmenting = false;
       });
+    }
+  }
+
+  // ----- YENİ EKLENEN: Düzenleme sonrası maskeyi güncelle -----
+  // (@override YOKTUR çünkü bu bizim yazdığımız özel bir fonksiyondur)
+  Future<void> _updateMaskFromPoints(List<Offset> newContours) async {
+    if (loadedImage == null) return;
+
+    final width = loadedImage!.width;
+    final height = loadedImage!.height;
+
+    // 1. Bir Canvas açıp siyah zemin üzerine beyaz poligon çizeceğiz
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+
+    // Arka planı siyah yap (Maske dışı)
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
+      Paint()..color = Colors.black,
+    );
+
+    if (newContours.isNotEmpty) {
+      final path = Path();
+      path.moveTo(newContours[0].dx, newContours[0].dy);
+      for (int i = 1; i < newContours.length; i++) {
+        path.lineTo(newContours[i].dx, newContours[i].dy);
+      }
+      path.close();
+
+      // İçini beyaz doldur (Maske içi)
+      final paint = Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.fill;
+
+      canvas.drawPath(path, paint);
+    }
+
+    // 2. Çizimi resme dönüştür
+    final picture = recorder.endRecording();
+    final newMaskImage = await picture.toImage(width, height);
+
+    setState(() {
+      maskImage = newMaskImage;
+      // Tek bir konturumuz olduğu için listeyi güncelliyoruz
+      maskContours = [newContours];
+    });
+  }
+
+  // ----- YENİ EKLENEN: Düzenleme sayfasını aç -----
+  // SegmentPage.dart içinde bu fonksiyonu güncelleyin:
+
+  void _openEditPage() async {
+    if (loadedImage == null || maskContours.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Düzenlenecek bir maske yok.")),
+      );
+      return;
+    }
+
+    // --- DEĞİŞİKLİK BURADA: HİÇBİR FİLTRE YOK ---
+    // Listeyi olduğu gibi, birebir kopyalayarak gönderiyoruz.
+    // Segmentasyon sonucu neyse, düzenleme ekranı odur.
+    final List<Offset> pointsToEdit = List.from(maskContours[0]);
+
+    final List<Offset>? editedPoints = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => EditSegmentPage(
+          image: loadedImage!,
+          initialContour: pointsToEdit,
+          maskId: 0,
+          token: widget.token,
+        ),
+      ),
+    );
+
+    if (editedPoints != null && editedPoints.isNotEmpty) {
+      await _updateMaskFromPoints(editedPoints);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Maske güncellendi!")),
+      );
     }
   }
 
@@ -392,6 +456,15 @@ class _SegmentPageState extends State<SegmentPage> {
                           ),
                           onPressed: () => setState(() => showMask = !showMask),
                         ),
+
+                        // --- DÜZENLEME BUTONU ---
+                        IconButton(
+                          icon: const Icon(Icons.edit, color: Colors.white),
+                          tooltip: "Maskeyi Düzenle",
+                          onPressed: (maskContours.isNotEmpty && !isSegmenting)
+                              ? _openEditPage
+                              : null,
+                        ),
                       ],
                     ),
                   ),
@@ -421,6 +494,9 @@ class _SegmentPageState extends State<SegmentPage> {
 }
 
 // ----- SADECE KENAR ÇİZGİLERİ ve NOKTALARI çizen CustomPainter -----
+// Bu sınıf artık temiz ve kendi içinde bağımsız
+// SegmentPage.dart en altındaki class:
+
 class _MaskOutlinePainter extends CustomPainter {
   final List<List<Offset>> contours;
   final double scale;
@@ -431,25 +507,20 @@ class _MaskOutlinePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (contours.isEmpty) return;
 
-    // Çizgi paint - mavi sürekli çizgi
     final linePaint = Paint()
       ..color = Colors.blue
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2.5
       ..strokeCap = StrokeCap.round;
 
-    // Nokta paint - kırmızı dolgulu noktalar
     final dotPaint = Paint()
       ..color = Colors.red
-      ..style = PaintingStyle.fill
-      ..strokeWidth=0.1;
+      ..style = PaintingStyle.fill;
 
-
-    // Köşe noktası paint - yeşil dış çizgili noktalar
     final cornerDotPaint = Paint()
       ..color = Colors.green
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 0.1;
+      ..strokeWidth = 1.0;
 
     for (final contour in contours) {
       if (contour.length < 2) continue;
@@ -457,43 +528,23 @@ class _MaskOutlinePainter extends CustomPainter {
       final path = Path();
       final scaledContour = contour.map((point) => point * scale).toList();
 
-      // Sürekli çizgi çiz
       path.moveTo(scaledContour[0].dx, scaledContour[0].dy);
       for (int i = 1; i < scaledContour.length; i++) {
         path.lineTo(scaledContour[i].dx, scaledContour[i].dy);
       }
-
-      // Çizgiyi kapat (opsiyonel)
       if (scaledContour.length > 2) {
         path.lineTo(scaledContour[0].dx, scaledContour[0].dy);
       }
-
-      // Çizgiyi çiz
       canvas.drawPath(path, linePaint);
 
-      // Köşe noktalarını çiz (her 5 noktada bir)
-      for (int i = 0; i < scaledContour.length; i += 5) {
-        if (i < scaledContour.length) {
-          final point = scaledContour[i];
+      // --- NOKTALARI ÇİZ ---
+      // HİÇBİR NOKTAYI ATLAMIYORUZ (i++)
+      for (int i = 0; i < scaledContour.length; i++) {
+        final point = scaledContour[i];
 
-          // Kırmızı iç dolgu
-          canvas.drawCircle(point, 6.0, dotPaint);
-          // Yeşil dış çerçeve
-          canvas.drawCircle(point, 6.0, cornerDotPaint);
-        }
-      }
-
-      // Başlangıç ve bitiş noktalarını özel işaretle
-      if (scaledContour.isNotEmpty) {
-        final firstPoint = scaledContour[0];
-        final lastPoint = scaledContour[scaledContour.length - 1];
-
-        // Büyük kırmızı noktalar
-        canvas.drawCircle(firstPoint, 8.0, dotPaint);
-        canvas.drawCircle(lastPoint, 8.0, dotPaint);
-        // Yeşil çerçeveler
-        canvas.drawCircle(firstPoint, 8.0, cornerDotPaint);
-        canvas.drawCircle(lastPoint, 8.0, cornerDotPaint);
+        // Edit sayfasıyla tutarlı boyutlar (Çap ~10-12)
+        canvas.drawCircle(point, 5.0, dotPaint);
+        canvas.drawCircle(point, 5.0, cornerDotPaint);
       }
     }
   }
