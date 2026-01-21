@@ -16,6 +16,7 @@ class SegmentPage extends StatefulWidget {
   final String token;
   final int userId;
 
+
   const SegmentPage({
     super.key,
     required this.token,
@@ -32,6 +33,7 @@ class _SegmentPageState extends State<SegmentPage> {
   ui.Image? loadedImage;
   ui.Image? maskImage;
   List<List<Offset>> maskContours = [];
+  int? currentMaskId;
 
   // UI durumları
   bool isLoading = false;
@@ -225,11 +227,15 @@ class _SegmentPageState extends State<SegmentPage> {
       if (response.statusCode == 200) {
         final responseData = json.decode(responseBody.body);
         final maskUrl = responseData['mask_url'];
+        final newMaskId = responseData['mask_id'];
 
         final maskResponse = await http.get(Uri.parse('$baseUrl$maskUrl'));
 
         if (maskResponse.statusCode == 200) {
           await loadMaskImage(maskResponse.bodyBytes);
+          setState(() {
+            currentMaskId = newMaskId; // ---> State güncelleniyor
+          });
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text("Segmentasyon başarılı!")),
           );
@@ -249,6 +255,55 @@ class _SegmentPageState extends State<SegmentPage> {
       setState(() {
         isSegmenting = false;
       });
+    }
+  }
+
+
+
+  Future<bool> _uploadMaskToServer(int maskId) async {
+    if (maskImage == null) return false;
+
+    try {
+      // 1. ui.Image'ı PNG Byte verisine çeviriyoruz
+      final byteData = await maskImage!.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null) return false;
+
+      final pngBytes = byteData.buffer.asUint8List();
+
+      // 2. İsteği Hazırla (Backend URL'ini buraya yaz)
+      // Örnek: 'http://192.168.1.20:8000/segment/$maskId'
+      final uri = Uri.parse('$baseUrl/segment/$maskId');
+
+      var request = http.MultipartRequest('PUT', uri);
+
+      // Eğer Token gerekiyorsa (Backend'de current_user var, muhtemelen gerekir):
+      request.headers['Authorization'] = 'Bearer ${widget.token}';
+
+      // 3. Dosyayı ekle (Backend'deki 'file' parametresiyle aynı isimde)
+      var multipartFile = http.MultipartFile.fromBytes(
+        'file',
+        pngBytes,
+        filename: 'updated_mask.png', // Uzantı önemli
+      );
+
+      request.files.add(multipartFile);
+
+      // 4. Gönder ve sonucu bekle
+      var response = await request.send();
+
+      if (response.statusCode == 200) {
+        print("Sunucuya başarıyla yüklendi.");
+        return true;
+      } else {
+        print("Yükleme hatası: ${response.statusCode}");
+        // Hata detayını görmek istersen:
+        // final respStr = await response.stream.bytesToString();
+        // print(respStr);
+        return false;
+      }
+    } catch (e) {
+      print("Bağlantı hatası: $e");
+      return false;
     }
   }
 
@@ -319,17 +374,35 @@ class _SegmentPageState extends State<SegmentPage> {
         builder: (context) => EditSegmentPage(
           image: loadedImage!,
           initialContour: pointsToEdit,
-          maskId: 0,
+          maskId: currentMaskId!,
           token: widget.token,
         ),
       ),
     );
 
     if (editedPoints != null && editedPoints.isNotEmpty) {
+      // 1. Önce ekranı (lokal görüntüyü) güncelle
       await _updateMaskFromPoints(editedPoints);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Maske güncellendi!")),
-      );
+
+      // 2. Güncellenen maskeyi sunucuya gönder (maskId'yi kendi değişkeninle değiştir)
+      // Kullanıcıya bir "Yükleniyor..." göstergesi koymak iyi olabilir.
+      bool success = await _uploadMaskToServer(currentMaskId!);
+
+      if (success && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Maske güncellendi ve sunucuya kaydedildi!"),
+            backgroundColor: Colors.green,
+          ),
+        );
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Maske ekranda güncellendi fakat sunucuya atılamadı."),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
