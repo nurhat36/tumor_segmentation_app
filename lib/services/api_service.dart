@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 class ApiService {
-  final String baseUrl = "http://10.0.2.2:8000";
+  final String baseUrl = "http://192.168.1.188:8000";
   // Android emulator için 10.0.2.2 kullan
   // Gerçek cihaz için bilgisayarın IP adresini yaz
 

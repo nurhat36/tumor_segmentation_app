@@ -22,26 +22,57 @@ class EditSegmentPage extends StatefulWidget {
 class _EditSegmentPageState extends State<EditSegmentPage> {
   late List<Offset> editablePoints;
 
+  // Zoom ve Pan kontrolcüsü
+  final TransformationController _transformationController = TransformationController();
+
+  // Slider değeri (0 - 100 arası)
+  double _sliderValue = 0.0;
+
+  // O anki zoom seviyesi (Varsayılan 1.0)
+  double _currentScale = 1.0;
+
   @override
   void initState() {
     super.initState();
-    // Gelen listeyi olduğu gibi al (Filtreleme YOK)
+    // Listeyi olduğu gibi al (SegmentPage'de zaten azalttık)
     editablePoints = List.from(widget.initialContour);
   }
 
+  @override
+  void dispose() {
+    _transformationController.dispose();
+    super.dispose();
+  }
+
+  // Nokta konumunu güncelleme
   void _onDragUpdate(int index, Offset newPos, double width, double height) {
     setState(() {
       editablePoints[index] = Offset(
         newPos.dx.clamp(0.0, width),
         newPos.dy.clamp(0.0, height),
       );
-      // Repaint tetiklemesi için
       editablePoints = List.from(editablePoints);
     });
   }
 
   void _saveEdit() {
     Navigator.pop(context, editablePoints);
+  }
+
+  // Slider değiştiğinde çalışacak fonksiyon
+  void _onSliderChanged(double value) {
+    setState(() {
+      _sliderValue = value;
+
+      // 0-100 arasındaki değeri 1.0x ile 5.0x zoom arasına dönüştür
+      // Formül: 1.0 + (value / 25) -> 100 değeri 5.0 zoom yapar.
+      double newScale = 1.0 + (value / 25.0);
+
+      // Zoom işlemini uygula (Matris ölçekleme)
+      // Identity matrisini alıp scale ediyoruz.
+      _transformationController.value = Matrix4.identity()..scale(newScale);
+      _currentScale = newScale;
+    });
   }
 
   @override
@@ -63,82 +94,166 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
           ),
         ],
       ),
-      body: Center(
-        child: AspectRatio(
-          aspectRatio: imgW / imgH,
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final double screenW = constraints.maxWidth;
-              final double screenH = constraints.maxHeight;
-              final double scaleX = screenW / imgW;
-              final double scaleY = screenH / imgH;
-              final double scale = (scaleX < scaleY) ? scaleX : scaleY;
+      body: Stack(
+        children: [
+          // --- 1. ZOOM YAPILABİLİR ALAN ---
+          InteractiveViewer(
+            transformationController: _transformationController,
+            // Sınırların dışına taşmayı engellemek için false yapabilirsin
+            constrained: false,
+            boundaryMargin: const EdgeInsets.all(100), // Resim kenara gidince boşluk
+            minScale: 1.0,
+            maxScale: 5.0,
+            // Kullanıcı parmakla pinch (kıstırma) yaparsa slider'ı güncellemek gerekir
+            onInteractionUpdate: (details) {
+              setState(() {
+                // Matrisin X eksenindeki ölçeğini al
+                _currentScale = _transformationController.value.getMaxScaleOnAxis();
+                // Scale'i (1.0 - 5.0) tekrar Slider (0-100) değerine çevir
+                _sliderValue = (_currentScale - 1.0) * 25.0;
+                if (_sliderValue < 0) _sliderValue = 0;
+                if (_sliderValue > 100) _sliderValue = 100;
+              });
+            },
+            child: SizedBox(
+              // InteractiveViewer içinde constrained: false olduğu için
+              // İçeriğin boyutunu ekran boyutuna sabitlememiz lazım.
+              // Ancak burada direkt resim boyutunu baz alacağız ve LayoutBuilder ile
+              // ekran boyutuna oranlayacağız.
+              width: MediaQuery.of(context).size.width,
+              height: MediaQuery.of(context).size.height,
+              child: Center(
+                child: AspectRatio(
+                  aspectRatio: imgW / imgH,
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final double screenW = constraints.maxWidth;
+                      final double screenH = constraints.maxHeight;
 
-              return Stack(
-                children: [
-                  // 1. Resim
-                  SizedBox(
-                    width: screenW,
-                    height: screenH,
-                    child: RawImage(image: widget.image, fit: BoxFit.contain),
-                  ),
+                      // Ekrana sığdırma oranı (Base Scale)
+                      final double scaleX = screenW / imgW;
+                      final double scaleY = screenH / imgH;
+                      final double baseScale = (scaleX < scaleY) ? scaleX : scaleY;
 
-                  // 2. Çizgi (Tüm noktalar)
-                  SizedBox(
-                    width: screenW,
-                    height: screenH,
-                    child: CustomPaint(
-                      painter: _EditorLinePainter(editablePoints, scale),
-                    ),
-                  ),
+                      return Stack(
+                        children: [
+                          // A. Resim
+                          SizedBox(
+                            width: screenW,
+                            height: screenH,
+                            child: RawImage(image: widget.image, fit: BoxFit.contain),
+                          ),
 
-                  // 3. Noktalar (HER NOKTA İÇİN)
-                  // Burada da filtreleme yapmıyoruz.
-                  ...editablePoints.asMap().entries.map((entry) {
-                    final i = entry.key;
-                    final p = entry.value;
-
-                    final double screenX = p.dx * scale;
-                    final double screenY = p.dy * scale;
-
-                    return Positioned(
-                      // Dokunma alanı geniş, nokta merkezde
-                      left: screenX - 15,
-                      top: screenY - 15,
-                      child: GestureDetector(
-                        onPanUpdate: (details) {
-                          final deltaX = details.delta.dx / scale;
-                          final deltaY = details.delta.dy / scale;
-                          _onDragUpdate(i, Offset(p.dx + deltaX, p.dy + deltaY), imgW, imgH);
-                        },
-                        child: Container(
-                          width: 30,
-                          height: 30,
-                          color: Colors.transparent,
-                          child: Center(
-                            child: Container(
-                              // SegmentPage ile uyumlu görsel boyut (Çap 10-12)
-                              width: 10.0,
-                              height: 10.0,
-                              decoration: BoxDecoration(
-                                color: Colors.red,
-                                shape: BoxShape.circle,
-                                border: Border.all(
-                                  color: Colors.green,
-                                  width: 1.5,
-                                ),
-                              ),
+                          // B. Çizgiler
+                          SizedBox(
+                            width: screenW,
+                            height: screenH,
+                            child: CustomPaint(
+                              painter: _EditorLinePainter(editablePoints, baseScale),
                             ),
                           ),
-                        ),
-                      ),
-                    );
-                  }),
-                ],
-              );
-            },
+
+                          // C. Noktalar
+                          ...editablePoints.asMap().entries.map((entry) {
+                            final i = entry.key;
+                            final p = entry.value;
+
+                            final double screenX = p.dx * baseScale;
+                            final double screenY = p.dy * baseScale;
+
+                            final bool isCorner = (i == 0 || i == editablePoints.length - 1);
+                            final double visualDiameter = isCorner ? 16.0 : 12.0;
+
+                            return Positioned(
+                              left: screenX - 15,
+                              top: screenY - 15,
+                              child: GestureDetector(
+                                onPanUpdate: (details) {
+                                  // HASSAS SÜRÜKLEME AYARI:
+                                  // Parmağın hareketini (delta) hem ekran ölçeğine (baseScale)
+                                  // hem de şu anki ZOOM oranına (_currentScale) bölüyoruz.
+                                  // Böylece zoom yapınca nokta fırlayıp gitmiyor.
+                                  final deltaX = details.delta.dx / (baseScale * _currentScale);
+                                  final deltaY = details.delta.dy / (baseScale * _currentScale);
+
+                                  _onDragUpdate(i, Offset(p.dx + deltaX, p.dy + deltaY), imgW, imgH);
+                                },
+                                child: Container(
+                                  width: 30,
+                                  height: 30,
+                                  color: Colors.transparent,
+                                  child: Center(
+                                    child: Container(
+                                      width: visualDiameter,
+                                      height: visualDiameter,
+                                      decoration: BoxDecoration(
+                                          color: Colors.red,
+                                          shape: BoxShape.circle,
+                                          border: Border.all(
+                                            color: Colors.green,
+                                            width: 2.0,
+                                          ),
+                                          boxShadow: const [
+                                            BoxShadow(
+                                              color: Colors.black54,
+                                              blurRadius: 2,
+                                              offset: Offset(0, 1),
+                                            )
+                                          ]
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            );
+                          }),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
           ),
-        ),
+
+          // --- 2. ZOOM BAR (SLIDER) ---
+          Positioned(
+            left: 20,
+            right: 20,
+            bottom: 30,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                  color: Colors.grey[900]!.withOpacity(0.8),
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black45, blurRadius: 10, offset: Offset(0, 5))
+                  ]
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.zoom_out, color: Colors.white70),
+                  Expanded(
+                    child: Slider(
+                      value: _sliderValue,
+                      min: 0,
+                      max: 100,
+                      activeColor: Colors.blueAccent,
+                      inactiveColor: Colors.white24,
+                      onChanged: _onSliderChanged,
+                    ),
+                  ),
+                  const Icon(Icons.zoom_in, color: Colors.white70),
+                  const SizedBox(width: 8),
+                  Text(
+                    "${_currentScale.toStringAsFixed(1)}x",
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -164,7 +279,10 @@ class _EditorLinePainter extends CustomPainter {
     for (int i = 1; i < scaledPoints.length; i++) {
       path.lineTo(scaledPoints[i].dx, scaledPoints[i].dy);
     }
-    path.close();
+    // Alanı kapat
+    if (scaledPoints.length > 2) {
+      path.lineTo(scaledPoints[0].dx, scaledPoints[0].dy);
+    }
     canvas.drawPath(path, linePaint);
   }
   @override
