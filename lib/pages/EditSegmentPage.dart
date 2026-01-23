@@ -29,12 +29,12 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
   double _sliderValue = 0.0;
 
   // O anki zoom seviyesi (Varsayılan 1.0)
+  // Bu değeri noktaların boyutunu ters orantılı ayarlamak için kullanacağız.
   double _currentScale = 1.0;
 
   @override
   void initState() {
     super.initState();
-    // Listeyi olduğu gibi al (SegmentPage'de zaten azalttık)
     editablePoints = List.from(widget.initialContour);
   }
 
@@ -47,10 +47,12 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
   // Nokta konumunu güncelleme
   void _onDragUpdate(int index, Offset newPos, double width, double height) {
     setState(() {
+      // Noktanın resim dışına çıkmasını engelle (Clamp)
       editablePoints[index] = Offset(
         newPos.dx.clamp(0.0, width),
         newPos.dy.clamp(0.0, height),
       );
+      // Listeyi güncelle ki UI tetiklensin
       editablePoints = List.from(editablePoints);
     });
   }
@@ -63,13 +65,8 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
   void _onSliderChanged(double value) {
     setState(() {
       _sliderValue = value;
-
-      // 0-100 arasındaki değeri 1.0x ile 5.0x zoom arasına dönüştür
-      // Formül: 1.0 + (value / 25) -> 100 değeri 5.0 zoom yapar.
+      // 1.0x ile 5.0x arası zoom
       double newScale = 1.0 + (value / 25.0);
-
-      // Zoom işlemini uygula (Matris ölçekleme)
-      // Identity matrisini alıp scale ediyoruz.
       _transformationController.value = Matrix4.identity()..scale(newScale);
       _currentScale = newScale;
     });
@@ -83,7 +80,7 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: const Text("Alanı Düzenle"),
+        title: const Text("Hassas Alan Düzenleme"),
         backgroundColor: Colors.grey[900],
         foregroundColor: Colors.white,
         actions: [
@@ -96,30 +93,24 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
       ),
       body: Stack(
         children: [
-          // --- 1. ZOOM YAPILABİLİR ALAN ---
+          // --- 1. ZOOM YAPILABİLİR ALAN (Senin Orijinal Yapın) ---
           InteractiveViewer(
             transformationController: _transformationController,
-            // Sınırların dışına taşmayı engellemek için false yapabilirsin
             constrained: false,
-            boundaryMargin: const EdgeInsets.all(100), // Resim kenara gidince boşluk
+            boundaryMargin: const EdgeInsets.all(200), // Kenar boşluğu artırıldı rahat pan için
             minScale: 1.0,
             maxScale: 5.0,
-            // Kullanıcı parmakla pinch (kıstırma) yaparsa slider'ı güncellemek gerekir
+            // Parmakla zoom yapınca slider'ı ve _currentScale'i güncelle
             onInteractionUpdate: (details) {
               setState(() {
-                // Matrisin X eksenindeki ölçeğini al
                 _currentScale = _transformationController.value.getMaxScaleOnAxis();
-                // Scale'i (1.0 - 5.0) tekrar Slider (0-100) değerine çevir
                 _sliderValue = (_currentScale - 1.0) * 25.0;
                 if (_sliderValue < 0) _sliderValue = 0;
                 if (_sliderValue > 100) _sliderValue = 100;
               });
             },
             child: SizedBox(
-              // InteractiveViewer içinde constrained: false olduğu için
-              // İçeriğin boyutunu ekran boyutuna sabitlememiz lazım.
-              // Ancak burada direkt resim boyutunu baz alacağız ve LayoutBuilder ile
-              // ekran boyutuna oranlayacağız.
+              // Ekran boyutunu alıyoruz
               width: MediaQuery.of(context).size.width,
               height: MediaQuery.of(context).size.height,
               child: Center(
@@ -130,12 +121,13 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
                       final double screenW = constraints.maxWidth;
                       final double screenH = constraints.maxHeight;
 
-                      // Ekrana sığdırma oranı (Base Scale)
+                      // Resmi ekrana sığdırma oranı (Base Scale)
                       final double scaleX = screenW / imgW;
                       final double scaleY = screenH / imgH;
                       final double baseScale = (scaleX < scaleY) ? scaleX : scaleY;
 
                       return Stack(
+                        clipBehavior: Clip.none, // Noktalar kenardan taşarsa kesilmesin
                         children: [
                           // A. Resim
                           SizedBox(
@@ -144,62 +136,82 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
                             child: RawImage(image: widget.image, fit: BoxFit.contain),
                           ),
 
-                          // B. Çizgiler
+                          // B. Çizgiler (CustomPaint ile)
+                          // Çizgi kalınlığını da zoom'a göre ayarlayalım ki çok kalınlaşmasın
                           SizedBox(
                             width: screenW,
                             height: screenH,
                             child: CustomPaint(
-                              painter: _EditorLinePainter(editablePoints, baseScale),
+                              painter: _EditorLinePainter(
+                                  points: editablePoints,
+                                  scale: baseScale,
+                                  // Zoom arttıkça çizgi incelsin
+                                  strokeWidth: 2.5 / _currentScale
+                              ),
                             ),
                           ),
 
-                          // C. Noktalar
+                          // C. Noktalar (Widget olarak)
                           ...editablePoints.asMap().entries.map((entry) {
                             final i = entry.key;
                             final p = entry.value;
 
+                            // Resim koordinatını ekran koordinatına çevir
                             final double screenX = p.dx * baseScale;
                             final double screenY = p.dy * baseScale;
 
+                            // Başlangıç ve bitiş noktaları biraz daha belirgin olsun
                             final bool isCorner = (i == 0 || i == editablePoints.length - 1);
-                            final double visualDiameter = isCorner ? 16.0 : 12.0;
+                            // Temel görsel boyut (zoomsuz hali)
+                            final double baseDiameter = isCorner ? 16.0 : 12.0;
+
+                            // Dokunma alanı boyutu (sabit kalacak)
+                            const double touchAreaSize = 40.0;
 
                             return Positioned(
-                              left: screenX - 15,
-                              top: screenY - 15,
+                              // Dokunma alanını merkeze al
+                              left: screenX - (touchAreaSize / 2),
+                              top: screenY - (touchAreaSize / 2),
                               child: GestureDetector(
                                 onPanUpdate: (details) {
-                                  // HASSAS SÜRÜKLEME AYARI:
-                                  // Parmağın hareketini (delta) hem ekran ölçeğine (baseScale)
+                                  // HASSAS SÜRÜKLEME HESABI (Senin kodundaki doğru mantık):
+                                  // Parmağın hareketini (delta) hem ekran sığdırma ölçeğine (baseScale)
                                   // hem de şu anki ZOOM oranına (_currentScale) bölüyoruz.
-                                  // Böylece zoom yapınca nokta fırlayıp gitmiyor.
+                                  // Böylece 5x zoomdayken parmak 5cm kaysa bile nokta resim üzerinde azıcık kayar.
                                   final deltaX = details.delta.dx / (baseScale * _currentScale);
                                   final deltaY = details.delta.dy / (baseScale * _currentScale);
 
                                   _onDragUpdate(i, Offset(p.dx + deltaX, p.dy + deltaY), imgW, imgH);
                                 },
                                 child: Container(
-                                  width: 30,
-                                  height: 30,
+                                  // Görünmez geniş dokunma alanı
+                                  width: touchAreaSize,
+                                  height: touchAreaSize,
                                   color: Colors.transparent,
                                   child: Center(
-                                    child: Container(
-                                      width: visualDiameter,
-                                      height: visualDiameter,
-                                      decoration: BoxDecoration(
-                                          color: Colors.red,
-                                          shape: BoxShape.circle,
-                                          border: Border.all(
-                                            color: Colors.green,
-                                            width: 2.0,
-                                          ),
-                                          boxShadow: const [
-                                            BoxShadow(
-                                              color: Colors.black54,
-                                              blurRadius: 2,
-                                              offset: Offset(0, 1),
-                                            )
-                                          ]
+                                    // İŞTE KİLİT NOKTA BURASI: TERS ÖLÇEKLEME (Inverse Scaling)
+                                    // InteractiveViewer büyüdükçe, biz bu widget'ı küçültüyoruz.
+                                    child: Transform.scale(
+                                      scale: 1.0 / _currentScale, // <--- BU SATIR ÖNEMLİ
+                                      child: Container(
+                                        // Görünür renkli nokta
+                                        width: baseDiameter,
+                                        height: baseDiameter,
+                                        decoration: BoxDecoration(
+                                            color: isCorner ? Colors.greenAccent : Colors.redAccent,
+                                            shape: BoxShape.circle,
+                                            border: Border.all(
+                                              color: Colors.white,
+                                              width: 1.5,
+                                            ),
+                                            boxShadow: const [
+                                              BoxShadow(
+                                                color: Colors.black54,
+                                                blurRadius: 2,
+                                                offset: Offset(0, 1),
+                                              )
+                                            ]
+                                        ),
                                       ),
                                     ),
                                   ),
@@ -216,7 +228,7 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
             ),
           ),
 
-          // --- 2. ZOOM BAR (SLIDER) ---
+          // --- 2. ZOOM BAR (SLIDER) - Aynen korundu ---
           Positioned(
             left: 20,
             right: 20,
@@ -259,32 +271,43 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
   }
 }
 
+// Çizgi çizen painter (Ufak bir güncellemeyle)
 class _EditorLinePainter extends CustomPainter {
   final List<Offset> points;
   final double scale;
-  _EditorLinePainter(this.points, this.scale);
+  final double strokeWidth; // Yeni parametre
+
+  _EditorLinePainter({
+    required this.points,
+    required this.scale,
+    required this.strokeWidth,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
     if (points.isEmpty) return;
     final linePaint = Paint()
-      ..color = Colors.blue
+      ..color = Colors.blueAccent.withOpacity(0.8)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.5
+      ..strokeWidth = strokeWidth // Dinamik kalınlık
       ..strokeCap = StrokeCap.round;
 
     final path = Path();
+    // Koordinatları ekran ölçeğine göre ayarla
     final scaledPoints = points.map((p) => p * scale).toList();
+
     path.moveTo(scaledPoints[0].dx, scaledPoints[0].dy);
     for (int i = 1; i < scaledPoints.length; i++) {
       path.lineTo(scaledPoints[i].dx, scaledPoints[i].dy);
     }
-    // Alanı kapat
     if (scaledPoints.length > 2) {
-      path.lineTo(scaledPoints[0].dx, scaledPoints[0].dy);
+      path.close(); // Yolu kapat
     }
     canvas.drawPath(path, linePaint);
   }
   @override
-  bool shouldRepaint(covariant _EditorLinePainter oldDelegate) => true;
+  bool shouldRepaint(covariant _EditorLinePainter oldDelegate) =>
+      oldDelegate.points != points ||
+          oldDelegate.scale != scale ||
+          oldDelegate.strokeWidth != strokeWidth;
 }
