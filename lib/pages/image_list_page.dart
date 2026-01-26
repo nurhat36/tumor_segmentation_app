@@ -24,7 +24,7 @@ class _ImageListPageState extends State<ImageListPage> {
   String? selectedImageUrl;   // seçilen resmin URL’i
   bool isDeleting = false;
 
-  final String baseUrl = "http://192.168.1.101:8000";
+  final String baseUrl = "http://10.0.2.2:8000";
 
   @override
   void initState() {

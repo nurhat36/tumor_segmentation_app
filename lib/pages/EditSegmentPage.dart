@@ -21,55 +21,100 @@ class EditSegmentPage extends StatefulWidget {
 
 class _EditSegmentPageState extends State<EditSegmentPage> {
   late List<Offset> editablePoints;
-
-  // Zoom ve Pan kontrolcüsü
   final TransformationController _transformationController = TransformationController();
 
-  // Slider değeri (0 - 100 arası)
-  double _sliderValue = 0.0;
+  // --- UNDO / REDO DEĞİŞKENLERİ ---
+  // Tüm değişikliklerin tutulduğu liste listesi
+  List<List<Offset>> _history = [];
+  // Şu an hangi adımdayız?
+  int _historyIndex = 0;
 
-  // O anki zoom seviyesi (Varsayılan 1.0)
-  // Bu değeri noktaların boyutunu ters orantılı ayarlamak için kullanacağız.
+  bool _isEditMode = false;
+  int? _activePointIndex;
   double _currentScale = 1.0;
 
   @override
   void initState() {
     super.initState();
+    // Başlangıç listesini oluştur
     editablePoints = List.from(widget.initialContour);
+
+    // İlk hali geçmişe ekle (Başlangıç noktası)
+    _history.add(List.from(editablePoints));
+
+    // Eğer manuel çizimse (boş liste), edit modunu aç
+    if (widget.initialContour.isEmpty) {
+      // _isEditMode = true; // İstersen direkt açabilirsin ama gezinme moduyla başlamak daha güvenli
+    }
+
+    _transformationController.addListener(_onTransformChanged);
   }
 
   @override
   void dispose() {
+    _transformationController.removeListener(_onTransformChanged);
     _transformationController.dispose();
     super.dispose();
   }
 
-  // Nokta konumunu güncelleme
-  void _onDragUpdate(int index, Offset newPos, double width, double height) {
+  void _onTransformChanged() {
     setState(() {
-      // Noktanın resim dışına çıkmasını engelle (Clamp)
-      editablePoints[index] = Offset(
-        newPos.dx.clamp(0.0, width),
-        newPos.dy.clamp(0.0, height),
-      );
-      // Listeyi güncelle ki UI tetiklensin
-      editablePoints = List.from(editablePoints);
+      _currentScale = _transformationController.value.getMaxScaleOnAxis();
     });
   }
+
+  // --- TARİHÇE YÖNETİMİ (Kritik Kısım) ---
+  void _recordHistory() {
+    // Eğer geçmişin ortasındaysak ve yeni işlem yaparsak, ilerideki (Redo) adımları silmeliyiz.
+    if (_historyIndex < _history.length - 1) {
+      _history = _history.sublist(0, _historyIndex + 1);
+    }
+
+    // Mevcut durumun kopyasını geçmişe ekle
+    _history.add(List.from(editablePoints));
+    _historyIndex++;
+    setState(() {}); // Butonları güncellemek için
+  }
+
+  void _undo() {
+    if (_historyIndex > 0) {
+      setState(() {
+        _historyIndex--;
+        // Listeyi tamamen değiştiriyoruz (Deep Copy yaparak referansı kopar)
+        editablePoints = List.from(_history[_historyIndex]);
+      });
+    }
+  }
+
+  void _redo() {
+    if (_historyIndex < _history.length - 1) {
+      setState(() {
+        _historyIndex++;
+        editablePoints = List.from(_history[_historyIndex]);
+      });
+    }
+  }
+  // ----------------------------------------
 
   void _saveEdit() {
     Navigator.pop(context, editablePoints);
   }
 
-  // Slider değiştiğinde çalışacak fonksiyon
-  void _onSliderChanged(double value) {
-    setState(() {
-      _sliderValue = value;
-      // 1.0x ile 5.0x arası zoom
-      double newScale = 1.0 + (value / 25.0);
-      _transformationController.value = Matrix4.identity()..scale(newScale);
-      _currentScale = newScale;
-    });
+  int? _findNearestPoint(Offset localPosition, double baseScale) {
+    double hitRadius = 40.0 / baseScale / _currentScale;
+    double minDistance = hitRadius;
+    int? closestIndex;
+
+    final imagePos = localPosition / baseScale;
+
+    for (int i = 0; i < editablePoints.length; i++) {
+      final distance = (editablePoints[i] - imagePos).distance;
+      if (distance < minDistance) {
+        minDistance = distance;
+        closestIndex = i;
+      }
+    }
+    return closestIndex;
   }
 
   @override
@@ -77,13 +122,33 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
     final imgW = widget.image.width.toDouble();
     final imgH = widget.image.height.toDouble();
 
+    // Undo/Redo Aktiflik Durumu
+    final canUndo = _historyIndex > 0;
+    final canRedo = _historyIndex < _history.length - 1;
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: const Text("Hassas Alan Düzenleme"),
-        backgroundColor: Colors.grey[900],
+        title: Text(_isEditMode ? "✏️ Çizim Modu" : "🖐️ Gezinme Modu"),
+        backgroundColor: _isEditMode ? Colors.blueAccent[700] : Colors.grey[900],
         foregroundColor: Colors.white,
+        elevation: 0,
         actions: [
+          // GERİ AL (UNDO)
+          IconButton(
+            icon: const Icon(Icons.undo),
+            tooltip: "Geri Al",
+            onPressed: canUndo ? _undo : null, // Pasifse tıklanamaz
+            color: canUndo ? Colors.white : Colors.white38,
+          ),
+          // İLERİ AL (REDO)
+          IconButton(
+            icon: const Icon(Icons.redo),
+            tooltip: "İleri Al",
+            onPressed: canRedo ? _redo : null,
+            color: canRedo ? Colors.white : Colors.white38,
+          ),
+          // KAYDET
           IconButton(
             icon: const Icon(Icons.check),
             onPressed: _saveEdit,
@@ -91,223 +156,206 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
           ),
         ],
       ),
-      body: Stack(
-        children: [
-          // --- 1. ZOOM YAPILABİLİR ALAN (Senin Orijinal Yapın) ---
-          InteractiveViewer(
-            transformationController: _transformationController,
-            constrained: false,
-            boundaryMargin: const EdgeInsets.all(200), // Kenar boşluğu artırıldı rahat pan için
-            minScale: 1.0,
-            maxScale: 5.0,
-            // Parmakla zoom yapınca slider'ı ve _currentScale'i güncelle
-            onInteractionUpdate: (details) {
-              setState(() {
-                _currentScale = _transformationController.value.getMaxScaleOnAxis();
-                _sliderValue = (_currentScale - 1.0) * 25.0;
-                if (_sliderValue < 0) _sliderValue = 0;
-                if (_sliderValue > 100) _sliderValue = 100;
-              });
-            },
-            child: SizedBox(
-              // Ekran boyutunu alıyoruz
-              width: MediaQuery.of(context).size.width,
-              height: MediaQuery.of(context).size.height,
-              child: Center(
-                child: AspectRatio(
-                  aspectRatio: imgW / imgH,
-                  child: LayoutBuilder(
-                    builder: (context, constraints) {
-                      final double screenW = constraints.maxWidth;
-                      final double screenH = constraints.maxHeight;
 
-                      // Resmi ekrana sığdırma oranı (Base Scale)
-                      final double scaleX = screenW / imgW;
-                      final double scaleY = screenH / imgH;
-                      final double baseScale = (scaleX < scaleY) ? scaleX : scaleY;
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () {
+          setState(() {
+            _isEditMode = !_isEditMode;
+            _activePointIndex = null;
+          });
+          ScaffoldMessenger.of(context).clearSnackBars();
+          if (_isEditMode) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text("Dokunarak ekle, basılı tutarak sil, sürükle."),
+              duration: Duration(seconds: 2),
+            ));
+          }
+        },
+        backgroundColor: _isEditMode ? Colors.green : Colors.blue,
+        icon: Icon(_isEditMode ? Icons.done : Icons.edit),
+        label: Text(_isEditMode ? "Bitir" : "Düzenle"),
+      ),
 
-                      return Stack(
-                        clipBehavior: Clip.none, // Noktalar kenardan taşarsa kesilmesin
-                        children: [
-                          // A. Resim
-                          SizedBox(
-                            width: screenW,
-                            height: screenH,
-                            child: RawImage(image: widget.image, fit: BoxFit.contain),
-                          ),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final double screenW = constraints.maxWidth;
+          final double screenH = constraints.maxHeight;
+          final double scaleX = screenW / imgW;
+          final double scaleY = screenH / imgH;
+          final double baseScale = (scaleX < scaleY) ? scaleX : scaleY;
 
-                          // B. Çizgiler (CustomPaint ile)
-                          // Çizgi kalınlığını da zoom'a göre ayarlayalım ki çok kalınlaşmasın
-                          SizedBox(
-                            width: screenW,
-                            height: screenH,
-                            child: CustomPaint(
-                              painter: _EditorLinePainter(
-                                  points: editablePoints,
-                                  scale: baseScale,
-                                  // Zoom arttıkça çizgi incelsin
-                                  strokeWidth: 2.5 / _currentScale
-                              ),
-                            ),
-                          ),
+          final double contentWidth = imgW * baseScale;
+          final double contentHeight = imgH * baseScale;
 
-                          // C. Noktalar (Widget olarak)
-                          ...editablePoints.asMap().entries.map((entry) {
-                            final i = entry.key;
-                            final p = entry.value;
+          return Center(
+            child: InteractiveViewer(
+              transformationController: _transformationController,
+              boundaryMargin: const EdgeInsets.all(double.infinity),
+              minScale: 0.1,
+              maxScale: 20.0,
+              panEnabled: !_isEditMode,
+              scaleEnabled: true,
 
-                            // Resim koordinatını ekran koordinatına çevir
-                            final double screenX = p.dx * baseScale;
-                            final double screenY = p.dy * baseScale;
+              child: SizedBox(
+                width: contentWidth,
+                height: contentHeight,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
 
-                            // Başlangıç ve bitiş noktaları biraz daha belirgin olsun
-                            final bool isCorner = (i == 0 || i == editablePoints.length - 1);
-                            // Temel görsel boyut (zoomsuz hali)
-                            final double baseDiameter = isCorner ? 16.0 : 12.0;
+                  // --- NOKTA SÜRÜKLEME ---
+                  onPanStart: _isEditMode ? (details) {
+                    final index = _findNearestPoint(details.localPosition, baseScale);
+                    if (index != null) {
+                      setState(() => _activePointIndex = index);
+                    }
+                  } : null,
 
-                            // Dokunma alanı boyutu (sabit kalacak)
-                            const double touchAreaSize = 40.0;
-
-                            return Positioned(
-                              // Dokunma alanını merkeze al
-                              left: screenX - (touchAreaSize / 2),
-                              top: screenY - (touchAreaSize / 2),
-                              child: GestureDetector(
-                                onPanUpdate: (details) {
-                                  // HASSAS SÜRÜKLEME HESABI (Senin kodundaki doğru mantık):
-                                  // Parmağın hareketini (delta) hem ekran sığdırma ölçeğine (baseScale)
-                                  // hem de şu anki ZOOM oranına (_currentScale) bölüyoruz.
-                                  // Böylece 5x zoomdayken parmak 5cm kaysa bile nokta resim üzerinde azıcık kayar.
-                                  final deltaX = details.delta.dx / (baseScale * _currentScale);
-                                  final deltaY = details.delta.dy / (baseScale * _currentScale);
-
-                                  _onDragUpdate(i, Offset(p.dx + deltaX, p.dy + deltaY), imgW, imgH);
-                                },
-                                child: Container(
-                                  // Görünmez geniş dokunma alanı
-                                  width: touchAreaSize,
-                                  height: touchAreaSize,
-                                  color: Colors.transparent,
-                                  child: Center(
-                                    // İŞTE KİLİT NOKTA BURASI: TERS ÖLÇEKLEME (Inverse Scaling)
-                                    // InteractiveViewer büyüdükçe, biz bu widget'ı küçültüyoruz.
-                                    child: Transform.scale(
-                                      scale: 1.0 / _currentScale, // <--- BU SATIR ÖNEMLİ
-                                      child: Container(
-                                        // Görünür renkli nokta
-                                        width: baseDiameter,
-                                        height: baseDiameter,
-                                        decoration: BoxDecoration(
-                                            color: isCorner ? Colors.greenAccent : Colors.redAccent,
-                                            shape: BoxShape.circle,
-                                            border: Border.all(
-                                              color: Colors.white,
-                                              width: 1.5,
-                                            ),
-                                            boxShadow: const [
-                                              BoxShadow(
-                                                color: Colors.black54,
-                                                blurRadius: 2,
-                                                offset: Offset(0, 1),
-                                              )
-                                            ]
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            );
-                          }),
-                        ],
+                  onPanUpdate: (_isEditMode && _activePointIndex != null) ? (details) {
+                    final delta = details.delta / baseScale / _currentScale;
+                    setState(() {
+                      Offset current = editablePoints[_activePointIndex!];
+                      editablePoints[_activePointIndex!] = Offset(
+                        (current.dx + delta.dx).clamp(0.0, imgW),
+                        (current.dy + delta.dy).clamp(0.0, imgH),
                       );
-                    },
+                    });
+                  } : null,
+
+                  // SÜRÜKLEME BİTİNCE -> GEÇMİŞE KAYDET
+                  onPanEnd: _isEditMode ? (_) {
+                    if (_activePointIndex != null) {
+                      _recordHistory(); // <-- Sürükleme bitince kaydet
+                      setState(() => _activePointIndex = null);
+                    }
+                  } : null,
+
+                  // --- NOKTA EKLEME (Tek Tık) ---
+                  onTapUp: _isEditMode ? (details) {
+                    if (_findNearestPoint(details.localPosition, baseScale) == null) {
+                      final imagePos = details.localPosition / baseScale;
+                      setState(() {
+                        editablePoints.add(Offset(
+                          imagePos.dx.clamp(0.0, imgW),
+                          imagePos.dy.clamp(0.0, imgH),
+                        ));
+                      });
+                      _recordHistory(); // <-- Ekleme bitince kaydet
+                    }
+                  } : null,
+
+                  // --- NOKTA SİLME (Uzun Basma) ---
+                  onLongPressStart: _isEditMode ? (details) {
+                    final index = _findNearestPoint(details.localPosition, baseScale);
+                    if (index != null) {
+                      setState(() {
+                        editablePoints.removeAt(index);
+                        _activePointIndex = null;
+                      });
+                      _recordHistory(); // <-- Silme bitince kaydet
+
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text("Nokta silindi"), duration: Duration(milliseconds: 300)),
+                      );
+                    }
+                  } : null,
+
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: RawImage(image: widget.image, fit: BoxFit.contain),
+                      ),
+                      Positioned.fill(
+                        child: CustomPaint(
+                          painter: _InvariantPainter(
+                            points: editablePoints,
+                            baseScale: baseScale,
+                            zoomLevel: _currentScale,
+                            activeIndex: _activePointIndex,
+                            isEditMode: _isEditMode,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
             ),
-          ),
-
-          // --- 2. ZOOM BAR (SLIDER) - Aynen korundu ---
-          Positioned(
-            left: 20,
-            right: 20,
-            bottom: 30,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              decoration: BoxDecoration(
-                  color: Colors.grey[900]!.withOpacity(0.8),
-                  borderRadius: BorderRadius.circular(20),
-                  boxShadow: const [
-                    BoxShadow(color: Colors.black45, blurRadius: 10, offset: Offset(0, 5))
-                  ]
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.zoom_out, color: Colors.white70),
-                  Expanded(
-                    child: Slider(
-                      value: _sliderValue,
-                      min: 0,
-                      max: 100,
-                      activeColor: Colors.blueAccent,
-                      inactiveColor: Colors.white24,
-                      onChanged: _onSliderChanged,
-                    ),
-                  ),
-                  const Icon(Icons.zoom_in, color: Colors.white70),
-                  const SizedBox(width: 8),
-                  Text(
-                    "${_currentScale.toStringAsFixed(1)}x",
-                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
+          );
+        },
       ),
     );
   }
 }
 
-// Çizgi çizen painter (Ufak bir güncellemeyle)
-class _EditorLinePainter extends CustomPainter {
+// --- RESSAM (Değişiklik Yok - Aynı Kalıyor) ---
+class _InvariantPainter extends CustomPainter {
   final List<Offset> points;
-  final double scale;
-  final double strokeWidth; // Yeni parametre
+  final double baseScale;
+  final double zoomLevel;
+  final int? activeIndex;
+  final bool isEditMode;
 
-  _EditorLinePainter({
+  _InvariantPainter({
     required this.points,
-    required this.scale,
-    required this.strokeWidth,
+    required this.baseScale,
+    required this.zoomLevel,
+    this.activeIndex,
+    required this.isEditMode,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
     if (points.isEmpty) return;
+
+    final double stroke = 1.5 / baseScale / zoomLevel;
+    final double dotRadius = (isEditMode ? 3.0 : 1.5) / baseScale / zoomLevel;
+    final double activeRadius = 5.0 / baseScale / zoomLevel;
+
+    final fillPaint = Paint()
+      ..color = isEditMode
+          ? Colors.blue.withOpacity(0.20)
+          : Colors.white.withOpacity(0.05)
+      ..style = PaintingStyle.fill;
+
     final linePaint = Paint()
-      ..color = Colors.blueAccent.withOpacity(0.8)
+      ..color = isEditMode ? Colors.blueAccent : Colors.greenAccent
       ..style = PaintingStyle.stroke
-      ..strokeWidth = strokeWidth // Dinamik kalınlık
-      ..strokeCap = StrokeCap.round;
+      ..strokeWidth = stroke
+      ..strokeCap = StrokeCap.round
+      ..isAntiAlias = true;
+
+    final dotPaint = Paint()
+      ..color = Colors.redAccent
+      ..style = PaintingStyle.fill;
+
+    final activeDotPaint = Paint()
+      ..color = Colors.amber
+      ..style = PaintingStyle.fill;
 
     final path = Path();
-    // Koordinatları ekran ölçeğine göre ayarla
-    final scaledPoints = points.map((p) => p * scale).toList();
+    final start = points[0] * baseScale;
+    path.moveTo(start.dx, start.dy);
+    for (int i = 1; i < points.length; i++) {
+      final p = points[i] * baseScale;
+      path.lineTo(p.dx, p.dy);
+    }
+    path.close();
 
-    path.moveTo(scaledPoints[0].dx, scaledPoints[0].dy);
-    for (int i = 1; i < scaledPoints.length; i++) {
-      path.lineTo(scaledPoints[i].dx, scaledPoints[i].dy);
-    }
-    if (scaledPoints.length > 2) {
-      path.close(); // Yolu kapat
-    }
+    canvas.drawPath(path, fillPaint);
     canvas.drawPath(path, linePaint);
+
+    if (isEditMode) {
+      for (int i = 0; i < points.length; i++) {
+        final point = points[i] * baseScale;
+        final bool isActive = (i == activeIndex);
+        double r = isActive ? activeRadius : dotRadius;
+        canvas.drawCircle(point, r, isActive ? activeDotPaint : dotPaint);
+      }
+    }
   }
+
   @override
-  bool shouldRepaint(covariant _EditorLinePainter oldDelegate) =>
-      oldDelegate.points != points ||
-          oldDelegate.scale != scale ||
-          oldDelegate.strokeWidth != strokeWidth;
+  bool shouldRepaint(covariant _InvariantPainter oldDelegate) {
+    return true;
+  }
 }
