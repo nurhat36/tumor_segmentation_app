@@ -16,7 +16,6 @@ class SegmentPage extends StatefulWidget {
   final String token;
   final int userId;
 
-
   const SegmentPage({
     super.key,
     required this.token,
@@ -41,11 +40,22 @@ class _SegmentPageState extends State<SegmentPage> {
   bool showMask = true;
   ShapeType selectedShape = ShapeType.rectangle;
 
+  // --- YENİ: Zoom ve Mod Kontrolü ---
+  final TransformationController _transformationController = TransformationController();
+  // True: Gezinme Modu (Zoom/Pan), False: Seçim Modu (Dikdörtgen Çizme)
+  bool _isPanMode = true;
+
   // Seçim
   Rect? selectionRectImage;
 
   // API endpoint
-  static const String baseUrl = "http://192.168.1.101:8000";
+  static const String baseUrl = "http://10.0.2.2:8000";
+
+  @override
+  void dispose() {
+    _transformationController.dispose();
+    super.dispose();
+  }
 
   // ----- Görsel yükleme -----
   Future<void> pickImage() async {
@@ -59,6 +69,8 @@ class _SegmentPageState extends State<SegmentPage> {
       selectionRectImage = null;
       maskImage = null;
       maskContours.clear();
+      // Yeni resim gelince zoom'u sıfırla
+      _transformationController.value = Matrix4.identity();
     });
 
     final bytes = await picked.readAsBytes();
@@ -98,14 +110,12 @@ class _SegmentPageState extends State<SegmentPage> {
 
       final visited = List.generate(width * height, (_) => false);
 
-      // Beyaz piksel olup olmadığını kontrol eden yardımcı fonksiyon
       bool isWhite(int x, int y) {
         if (x < 0 || x >= width || y < 0 || y >= height) return false;
         final index = y * width + x;
         return pixels[index * 4] > 200;
       }
 
-      // Basit bir kontur takibi algoritması ile bir yol oluştur
       Offset? startPoint;
       for (int y = 0; y < height && startPoint == null; y++) {
         for (int x = 0; x < width && startPoint == null; x++) {
@@ -189,11 +199,7 @@ class _SegmentPageState extends State<SegmentPage> {
     return (scale: s, offset: Offset(dx, dy));
   }
 
-  Offset _canvasToImage(Offset canvasPos, double scale, Offset off) {
-    return Offset((canvasPos.dx - off.dx) / scale, (canvasPos.dy - off.dy) / scale);
-  }
-
-  // ----- API'ye segment isteği gönder -----
+  // ----- API İstekleri -----
   Future<void> _sendSegmentRequest() async {
     if (selectionRectImage == null || selectedImage == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -234,20 +240,18 @@ class _SegmentPageState extends State<SegmentPage> {
         if (maskResponse.statusCode == 200) {
           await loadMaskImage(maskResponse.bodyBytes);
           setState(() {
-            currentMaskId = newMaskId; // ---> State güncelleniyor
+            currentMaskId = newMaskId;
           });
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text("Segmentasyon başarılı!")),
           );
         }
       } else {
-        print('HTTP Hatası: ${response.statusCode}');
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text("Hata oluştu: ${response.statusCode}")),
         );
       }
     } catch (e) {
-      print('İstek Hatası: $e');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Hata: $e")),
       );
@@ -258,73 +262,42 @@ class _SegmentPageState extends State<SegmentPage> {
     }
   }
 
-
-
   Future<bool> _uploadMaskToServer(int maskId) async {
     if (maskImage == null) return false;
-
     try {
-      // 1. ui.Image'ı PNG Byte verisine çeviriyoruz
       final byteData = await maskImage!.toByteData(format: ui.ImageByteFormat.png);
       if (byteData == null) return false;
-
       final pngBytes = byteData.buffer.asUint8List();
 
-      // 2. İsteği Hazırla (Backend URL'ini buraya yaz)
-      // Örnek: 'http://192.168.1.20:8000/segment/$maskId'
       final uri = Uri.parse('$baseUrl/segment/$maskId');
-
       var request = http.MultipartRequest('PUT', uri);
-
-      // Eğer Token gerekiyorsa (Backend'de current_user var, muhtemelen gerekir):
       request.headers['Authorization'] = 'Bearer ${widget.token}';
 
-      // 3. Dosyayı ekle (Backend'deki 'file' parametresiyle aynı isimde)
       var multipartFile = http.MultipartFile.fromBytes(
         'file',
         pngBytes,
-        filename: 'updated_mask.png', // Uzantı önemli
+        filename: 'updated_mask.png',
       );
-
       request.files.add(multipartFile);
 
-      // 4. Gönder ve sonucu bekle
       var response = await request.send();
-
-      if (response.statusCode == 200) {
-        print("Sunucuya başarıyla yüklendi.");
-        return true;
-      } else {
-        print("Yükleme hatası: ${response.statusCode}");
-        // Hata detayını görmek istersen:
-        // final respStr = await response.stream.bytesToString();
-        // print(respStr);
-        return false;
-      }
+      return response.statusCode == 200;
     } catch (e) {
       print("Bağlantı hatası: $e");
       return false;
     }
   }
 
-  // ----- YENİ EKLENEN: Düzenleme sonrası maskeyi güncelle -----
-  // (@override YOKTUR çünkü bu bizim yazdığımız özel bir fonksiyondur)
   Future<void> _updateMaskFromPoints(List<Offset> newContours) async {
     if (loadedImage == null) return;
-
     final width = loadedImage!.width;
     final height = loadedImage!.height;
-
-    // 1. Bir Canvas açıp siyah zemin üzerine beyaz poligon çizeceğiz
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
-
-    // Arka planı siyah yap (Maske dışı)
     canvas.drawRect(
       Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
       Paint()..color = Colors.black,
     );
-
     if (newContours.isNotEmpty) {
       final path = Path();
       path.moveTo(newContours[0].dx, newContours[0].dy);
@@ -332,28 +305,18 @@ class _SegmentPageState extends State<SegmentPage> {
         path.lineTo(newContours[i].dx, newContours[i].dy);
       }
       path.close();
-
-      // İçini beyaz doldur (Maske içi)
       final paint = Paint()
         ..color = Colors.white
         ..style = PaintingStyle.fill;
-
       canvas.drawPath(path, paint);
     }
-
-    // 2. Çizimi resme dönüştür
     final picture = recorder.endRecording();
     final newMaskImage = await picture.toImage(width, height);
-
     setState(() {
       maskImage = newMaskImage;
-      // Tek bir konturumuz olduğu için listeyi güncelliyoruz
       maskContours = [newContours];
     });
   }
-
-  // ----- YENİ EKLENEN: Düzenleme sayfasını aç -----
-  // SegmentPage.dart içinde bu fonksiyonu güncelleyin:
 
   void _openEditPage() async {
     if (loadedImage == null || maskContours.isEmpty) {
@@ -362,47 +325,54 @@ class _SegmentPageState extends State<SegmentPage> {
       );
       return;
     }
-
-    // --- DEĞİŞİKLİK BURADA: HİÇBİR FİLTRE YOK ---
-    // Listeyi olduğu gibi, birebir kopyalayarak gönderiyoruz.
-    // Segmentasyon sonucu neyse, düzenleme ekranı odur.
     final List<Offset> pointsToEdit = List.from(maskContours[0]);
-
     final List<Offset>? editedPoints = await Navigator.push(
       context,
       MaterialPageRoute(
         builder: (context) => EditSegmentPage(
           image: loadedImage!,
           initialContour: pointsToEdit,
-          maskId: currentMaskId!,
+          maskId: currentMaskId ?? 0,
           token: widget.token,
         ),
       ),
     );
-
     if (editedPoints != null && editedPoints.isNotEmpty) {
-      // 1. Önce ekranı (lokal görüntüyü) güncelle
       await _updateMaskFromPoints(editedPoints);
-
-      // 2. Güncellenen maskeyi sunucuya gönder (maskId'yi kendi değişkeninle değiştir)
-      // Kullanıcıya bir "Yükleniyor..." göstergesi koymak iyi olabilir.
-      bool success = await _uploadMaskToServer(currentMaskId!);
-
-      if (success && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("Maske güncellendi ve sunucuya kaydedildi!"),
-            backgroundColor: Colors.green,
-          ),
-        );
-      } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("Maske ekranda güncellendi fakat sunucuya atılamadı."),
-            backgroundColor: Colors.red,
-          ),
-        );
+      if (currentMaskId != null) {
+        bool success = await _uploadMaskToServer(currentMaskId!);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(success ? "Kaydedildi" : "Sunucuya yüklenemedi")),
+          );
+        }
       }
+    }
+  }
+
+  void _startManualDrawing() async {
+    if (loadedImage == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Lütfen önce bir resim seçin.")),
+      );
+      return;
+    }
+    final List<Offset>? manualPoints = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => EditSegmentPage(
+          image: loadedImage!,
+          initialContour: [],
+          maskId: currentMaskId ?? 0,
+          token: widget.token,
+        ),
+      ),
+    );
+    if (manualPoints != null && manualPoints.isNotEmpty) {
+      await _updateMaskFromPoints(manualPoints);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Manuel çizim oluşturuldu.")),
+      );
     }
   }
 
@@ -412,6 +382,26 @@ class _SegmentPageState extends State<SegmentPage> {
       appBar: AppBar(
         title: const Text("Segment İşlemi"),
         actions: [
+          // MOD DEĞİŞTİRME BUTONU (Pan vs Select)
+          IconButton(
+            icon: Icon(_isPanMode ? Icons.pan_tool : Icons.crop_free),
+            tooltip: _isPanMode ? "Gezinme Modu (Seçim Yapılamaz)" : "Seçim Modu (Kaydırma Yapılamaz)",
+            style: IconButton.styleFrom(
+              backgroundColor: _isPanMode ? Colors.grey[800] : Colors.blueAccent,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () {
+              setState(() {
+                _isPanMode = !_isPanMode;
+              });
+              ScaffoldMessenger.of(context).clearSnackBars();
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text(_isPanMode ? "Gezinme Modu: Yakınlaştır ve Kaydır" : "Seçim Modu: Dikdörtgen Çiz"),
+                duration: const Duration(seconds: 1),
+              ));
+            },
+          ),
+          const SizedBox(width: 8),
           IconButton(
             icon: const Icon(Icons.upload_file),
             onPressed: pickImage,
@@ -422,142 +412,158 @@ class _SegmentPageState extends State<SegmentPage> {
           ? const Center(child: CircularProgressIndicator())
           : loadedImage == null
           ? const Center(child: Text("Resim seçiniz"))
-          : Stack(
+          : Column(
         children: [
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final fit = _fit(Size(constraints.maxWidth, constraints.maxHeight - 80));
-              final imgW = loadedImage!.width.toDouble();
-              final imgH = loadedImage!.height.toDouble();
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                // Resmi ekrana sığdıran temel oranlar
+                final double screenW = constraints.maxWidth;
+                final double screenH = constraints.maxHeight;
+                final fit = _fit(Size(screenW, screenH));
 
-              return Column(
-                children: [
-                  Expanded(
-                    child: GestureDetector(
-                      onPanStart: (details) {
-                        final pImg = _canvasToImage(details.localPosition, fit.scale, fit.offset);
-                        if (pImg.dx < 0 || pImg.dy < 0 || pImg.dx > imgW || pImg.dy > imgH) return;
-                        setState(() {
-                          selectionRectImage = Rect.fromLTWH(pImg.dx, pImg.dy, 0, 0);
-                          maskImage = null;
-                          maskContours.clear();
-                        });
-                      },
-                      onPanUpdate: (details) {
-                        if (selectionRectImage == null) return;
-                        final pImg = _canvasToImage(details.localPosition, fit.scale, fit.offset);
-                        final x = pImg.dx.clamp(0.0, imgW);
-                        final y = pImg.dy.clamp(0.0, imgH);
-                        final left = selectionRectImage!.left;
-                        final top = selectionRectImage!.top;
-                        final w = (x - left);
-                        final h = (y - top);
-                        setState(() {
-                          selectionRectImage = Rect.fromLTWH(
-                            w >= 0 ? left : x,
-                            h >= 0 ? top : y,
-                            w.abs(),
-                            h.abs(),
-                          );
-                        });
-                      },
-                      child: Stack(
-                        children: [
-                          // Orijinal resim
-                          Positioned(
-                            left: fit.offset.dx,
-                            top: fit.offset.dy,
-                            width: imgW * fit.scale,
-                            height: imgH * fit.scale,
-                            child: RawImage(
-                              image: loadedImage,
-                              fit: BoxFit.fill,
-                            ),
-                          ),
+                // InteractiveViewer içeriğinin boyutu
+                final double contentW = loadedImage!.width.toDouble() * fit.scale;
+                final double contentH = loadedImage!.height.toDouble() * fit.scale;
 
-                          // Maskenin konturlarını çiz (SADECE KENARLAR)
-                          if (maskContours.isNotEmpty && showMask)
-                            Positioned(
-                              left: fit.offset.dx,
-                              top: fit.offset.dy,
-                              width: imgW * fit.scale,
-                              height: imgH * fit.scale,
-                              child: CustomPaint(
-                                painter: _MaskOutlinePainter(
-                                  maskContours,
-                                  fit.scale,
-                                ),
+                return Center(
+                  child: InteractiveViewer(
+                    transformationController: _transformationController,
+                    boundaryMargin: const EdgeInsets.all(500),
+                    minScale: 0.1,
+                    maxScale: 10.0,
+                    // Seçim modundaysak Pan (Kaydırma) kapalı olsun ki çizim yapabilelim
+                    panEnabled: _isPanMode,
+                    scaleEnabled: true, // Zoom her zaman açık olabilir (iki parmakla)
+
+                    child: SizedBox(
+                      width: contentW,
+                      height: contentH,
+                      child: GestureDetector(
+                        // --- SEÇİM (DİKDÖRTGEN ÇİZME) ---
+                        // Sadece _isPanMode FALSE ise (yani Seçim Modu açıksa) çalışır.
+                        onPanStart: !_isPanMode ? (details) {
+                          // Koordinatı InteractiveViewer'ın içindeki local'e göre alıyoruz.
+                          // Resim zaten fit edildiği için, bu koordinatı scale'e bölüp
+                          // orijinal resim koordinatını buluyoruz.
+                          final pImg = details.localPosition / fit.scale;
+
+                          setState(() {
+                            // Yeni seçime başla
+                            selectionRectImage = Rect.fromLTWH(pImg.dx, pImg.dy, 0, 0);
+                            // Eski maskeyi temizle
+                            maskImage = null;
+                            maskContours.clear();
+                          });
+                        } : null,
+
+                        onPanUpdate: (!_isPanMode && selectionRectImage != null) ? (details) {
+                          final pImg = details.localPosition / fit.scale;
+                          final imgW = loadedImage!.width.toDouble();
+                          final imgH = loadedImage!.height.toDouble();
+
+                          final startX = selectionRectImage!.left;
+                          final startY = selectionRectImage!.top;
+
+                          // Anlık konumu sınırla
+                          final currentX = pImg.dx.clamp(0.0, imgW);
+                          final currentY = pImg.dy.clamp(0.0, imgH);
+
+                          setState(() {
+                            // Dikdörtgeni güncelle (Ters çekilirse de düzgün olsun diye Rect.fromPoints)
+                            selectionRectImage = Rect.fromPoints(
+                              Offset(startX, startY),
+                              Offset(currentX, currentY),
+                            );
+                          });
+                        } : null,
+
+                        child: Stack(
+                          children: [
+                            // 1. Resim
+                            Positioned.fill(
+                              child: RawImage(
+                                image: loadedImage,
+                                fit: BoxFit.contain,
                               ),
                             ),
 
-                          // Seçim dikdörtgeni
-                          if (selectionRectImage != null && maskImage == null)
-                            Positioned(
-                              left: fit.offset.dx + selectionRectImage!.left * fit.scale,
-                              top: fit.offset.dy + selectionRectImage!.top * fit.scale,
-                              width: selectionRectImage!.width * fit.scale,
-                              height: selectionRectImage!.height * fit.scale,
-                              child: Container(
-                                decoration: BoxDecoration(
-                                  border: Border.all(color: Colors.blue, width: 2),
-                                  color: Colors.blue.withOpacity(0.25),
+                            // 2. Maske Çizimi
+                            if (maskContours.isNotEmpty && showMask)
+                              Positioned.fill(
+                                child: CustomPaint(
+                                  painter: _MaskOutlinePainter(
+                                    maskContours,
+                                    fit.scale, // InteractiveViewer içinde olduğumuz için fit.scale yeterli
+                                  ),
                                 ),
                               ),
-                            ),
-                        ],
+
+                            // 3. Seçim Dikdörtgeni (Mavi Kutu)
+                            if (selectionRectImage != null && maskImage == null)
+                            // CustomPaint kullanarak çiziyoruz ki Positioned hesaplamalarıyla uğraşmayalım
+                              Positioned.fill(
+                                child: CustomPaint(
+                                  painter: _SelectionPainter(
+                                    rect: selectionRectImage!,
+                                    scale: fit.scale,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
+                );
+              },
+            ),
+          ),
 
-                  // Alt bar
-                  Container(
-                    height: 80,
-                    color: Colors.grey[900],
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                        IconButton(
-                          icon: isSegmenting
-                              ? const CircularProgressIndicator(color: Colors.white)
-                              : const Icon(Icons.play_arrow, color: Colors.white),
-                          onPressed: isSegmenting ? null : _sendSegmentRequest,
-                        ),
-                        IconButton(
-                          icon: Icon(
-                            showMask ? Icons.visibility : Icons.visibility_off,
-                            color: Colors.white,
-                          ),
-                          onPressed: () => setState(() => showMask = !showMask),
-                        ),
-
-                        // --- DÜZENLEME BUTONU ---
-                        IconButton(
-                          icon: const Icon(Icons.edit, color: Colors.white),
-                          tooltip: "Maskeyi Düzenle",
-                          onPressed: (maskContours.isNotEmpty && !isSegmenting)
-                              ? _openEditPage
-                              : null,
-                        ),
-                      ],
-                    ),
+          // ALT BAR
+          Container(
+            height: 80,
+            color: Colors.grey[900],
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                IconButton(
+                  icon: isSegmenting
+                      ? const CircularProgressIndicator(color: Colors.white)
+                      : const Icon(Icons.play_arrow, color: Colors.white),
+                  onPressed: isSegmenting ? null : _sendSegmentRequest,
+                ),
+                IconButton(
+                  icon: Icon(
+                    showMask ? Icons.visibility : Icons.visibility_off,
+                    color: Colors.white,
                   ),
-                ],
-              );
-            },
+                  onPressed: () => setState(() => showMask = !showMask),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.gesture, color: Colors.orangeAccent),
+                  tooltip: "Kendin Çiz",
+                  onPressed: (loadedImage != null && !isSegmenting)
+                      ? _startManualDrawing
+                      : null,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.edit, color: Colors.white),
+                  tooltip: "Maskeyi Düzenle",
+                  onPressed: (maskContours.isNotEmpty && !isSegmenting)
+                      ? _openEditPage
+                      : null,
+                ),
+              ],
+            ),
           ),
 
           if (isSegmenting)
             Container(
+              height: 40,
               color: Colors.black54,
               child: const Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    CircularProgressIndicator(),
-                    SizedBox(height: 16),
-                    Text("Segmentasyon yapılıyor...", style: TextStyle(color: Colors.white)),
-                  ],
-                ),
+                child: Text("Segmentasyon yapılıyor...", style: TextStyle(color: Colors.white)),
               ),
             ),
         ],
@@ -566,10 +572,7 @@ class _SegmentPageState extends State<SegmentPage> {
   }
 }
 
-// ----- SADECE KENAR ÇİZGİLERİ ve NOKTALARI çizen CustomPainter -----
-// Bu sınıf artık temiz ve kendi içinde bağımsız
-// SegmentPage.dart en altındaki class:
-
+// --- Maske Ressamı ---
 class _MaskOutlinePainter extends CustomPainter {
   final List<List<Offset>> contours;
   final double scale;
@@ -583,7 +586,7 @@ class _MaskOutlinePainter extends CustomPainter {
     final linePaint = Paint()
       ..color = Colors.blue
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.5
+      ..strokeWidth = 2.5 / 1.0 // Zoom'a göre incelmesini isterseniz buraya transformation scale eklemelisiniz ama şu an sabit kalsın.
       ..strokeCap = StrokeCap.round;
 
     final dotPaint = Paint()
@@ -597,33 +600,64 @@ class _MaskOutlinePainter extends CustomPainter {
 
     for (final contour in contours) {
       if (contour.length < 2) continue;
-
       final path = Path();
-      final scaledContour = contour.map((point) => point * scale).toList();
 
-      path.moveTo(scaledContour[0].dx, scaledContour[0].dy);
-      for (int i = 1; i < scaledContour.length; i++) {
-        path.lineTo(scaledContour[i].dx, scaledContour[i].dy);
+      // Resim koordinatını ekrana çevir (scale ile çarp)
+      path.moveTo(contour[0].dx * scale, contour[0].dy * scale);
+      for (int i = 1; i < contour.length; i++) {
+        path.lineTo(contour[i].dx * scale, contour[i].dy * scale);
       }
-      if (scaledContour.length > 2) {
-        path.lineTo(scaledContour[0].dx, scaledContour[0].dy);
-      }
+      path.close();
       canvas.drawPath(path, linePaint);
 
-      // --- NOKTALARI ÇİZ ---
-      // HİÇBİR NOKTAYI ATLAMIYORUZ (i++)
-      for (int i = 0; i < scaledContour.length; i++) {
-        final point = scaledContour[i];
-
-        // Edit sayfasıyla tutarlı boyutlar (Çap ~10-12)
-        canvas.drawCircle(point, 5.0, dotPaint);
-        canvas.drawCircle(point, 5.0, cornerDotPaint);
+      for (int i = 0; i < contour.length; i++) {
+        final point = contour[i] * scale;
+        canvas.drawCircle(point, 2.5, dotPaint);
+        canvas.drawCircle(point, 2.5, cornerDotPaint);
       }
     }
   }
 
   @override
   bool shouldRepaint(covariant _MaskOutlinePainter oldDelegate) {
-    return oldDelegate.contours != contours || oldDelegate.scale != scale;
+    return true;
+  }
+}
+
+// --- Seçim Dikdörtgeni Ressamı ---
+// Positioned kullanmak yerine Painter kullandık çünkü InteractiveViewer içinde
+// Positioned hesaplamak kaymalara neden olabilir.
+class _SelectionPainter extends CustomPainter {
+  final Rect rect;
+  final double scale;
+
+  _SelectionPainter({required this.rect, required this.scale});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.blue.withOpacity(0.3)
+      ..style = PaintingStyle.fill;
+
+    final borderPaint = Paint()
+      ..color = Colors.blue
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+
+    // Resim koordinatındaki Rect'i ekrana uyarlıyoruz
+    final screenRect = Rect.fromLTRB(
+      rect.left * scale,
+      rect.top * scale,
+      rect.right * scale,
+      rect.bottom * scale,
+    );
+
+    canvas.drawRect(screenRect, paint);
+    canvas.drawRect(screenRect, borderPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _SelectionPainter oldDelegate) {
+    return oldDelegate.rect != rect || oldDelegate.scale != scale;
   }
 }
