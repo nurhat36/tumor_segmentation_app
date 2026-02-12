@@ -349,6 +349,54 @@ class _SegmentPageState extends State<SegmentPage> {
       }
     }
   }
+  Future<bool> _createManualMaskOnServer() async {
+    if (maskImage == null || selectedImage == null) return false;
+
+    try {
+      final byteData = await maskImage!.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null) return false;
+      final pngBytes = byteData.buffer.asUint8List();
+
+      var request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$baseUrl/segment/manual'),
+      );
+
+      request.headers['Authorization'] = 'Bearer ${widget.token}';
+
+      // Orijinal resim
+      request.files.add(
+        await http.MultipartFile.fromPath(
+          'original_file',
+          selectedImage!.path,
+        ),
+      );
+
+      // Maske
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'mask_file',
+          pngBytes,
+          filename: 'manual_mask.png',
+        ),
+      );
+
+      var response = await request.send();
+      final responseBody = await http.Response.fromStream(response);
+
+      if (response.statusCode == 200) {
+        final data = json.decode(responseBody.body);
+        currentMaskId = data["mask_id"];   // 🔥 ÇOK ÖNEMLİ
+        return true;
+      }
+
+      return false;
+    } catch (e) {
+      print("Create error: $e");
+      return false;
+    }
+  }
+
 
   void _startManualDrawing() async {
     if (loadedImage == null) {
@@ -370,10 +418,24 @@ class _SegmentPageState extends State<SegmentPage> {
     );
     if (manualPoints != null && manualPoints.isNotEmpty) {
       await _updateMaskFromPoints(manualPoints);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Manuel çizim oluşturuldu.")),
-      );
+
+      bool success;
+
+      if (currentMaskId == null) {
+        // 🔥 İlk kez kaydediliyor → CREATE
+        success = await _createManualMaskOnServer();
+      } else {
+        // 🔥 Var olan maskeyi güncelle → UPDATE
+        success = await _uploadMaskToServer(currentMaskId!);
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(success ? "Kaydedildi" : "Sunucuya yüklenemedi")),
+        );
+      }
     }
+
   }
 
   @override
