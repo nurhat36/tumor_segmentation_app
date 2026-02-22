@@ -2,15 +2,20 @@ import 'package:flutter/material.dart';
 import '../services/api_service.dart';
 import 'EditSegmentPage.dart';
 import 'SegmentPage.dart';
-import 'dart:async';  // Completer için
-import 'dart:ui' as ui;  // ui.Image için
-
+import 'dart:async';
+import 'dart:ui' as ui;
 
 class ImageListPage extends StatefulWidget {
   final String token;
-  final int userId;
+  final int patientId;
+  final String patientName;
 
-  const ImageListPage({super.key, required this.token, required this.userId});
+  const ImageListPage({
+    super.key,
+    required this.token,
+    required this.patientId,
+    required this.patientName,
+  });
 
   @override
   State<ImageListPage> createState() => _ImageListPageState();
@@ -20,8 +25,8 @@ class _ImageListPageState extends State<ImageListPage> {
   final ApiService apiService = ApiService();
   late Future<List<dynamic>> imagesFuture;
 
-  int? selectedImageId;       // seçilen resmin ID’si
-  String? selectedImageUrl;   // seçilen resmin URL’i
+  int? selectedImageId;
+  String? selectedImageUrl;
   bool isDeleting = false;
 
   final String baseUrl = "http://10.0.2.2:8000";
@@ -34,9 +39,9 @@ class _ImageListPageState extends State<ImageListPage> {
 
   void _refreshImages() {
     setState(() {
-      imagesFuture = apiService.getSegmentedImages(widget.token);
+      imagesFuture =
+          apiService.getImagesByPatient(widget.token, widget.patientId);
     });
-    debugPrint("Yenileme isteği atıldı.");
   }
 
   String normalizeUrl(dynamic value) {
@@ -47,25 +52,29 @@ class _ImageListPageState extends State<ImageListPage> {
   }
 
   dynamic _extractId(Map<String, dynamic> img) {
-    return img['id'] ?? img['mask_id'] ?? img['maskId'] ?? img['maskID'];
+    return img['id'] ?? img['mask_id'];
   }
 
   Future<void> _deleteSelected() async {
     if (selectedImageId == null) return;
+
     setState(() => isDeleting = true);
+
     try {
-      debugPrint("Silinecek ID: $selectedImageId");
-      await apiService.deleteSegmentedImage(widget.token, selectedImageId!);
+      await apiService.deleteMask(widget.token, selectedImageId!);
+
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Resim silindi.")),
+        const SnackBar(content: Text("Mask silindi.")),
       );
+
       _refreshImages();
+
       setState(() {
         selectedImageId = null;
         selectedImageUrl = null;
       });
+
     } catch (e) {
-      debugPrint("Silme hatası (UI): $e");
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Silme hatası: $e")),
       );
@@ -78,7 +87,7 @@ class _ImageListPageState extends State<ImageListPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Segmente Edilmiş Görseller"),
+        title: Text("${widget.patientName} - Maskeler"),
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
@@ -92,45 +101,37 @@ class _ImageListPageState extends State<ImageListPage> {
             child: FutureBuilder<List<dynamic>>(
               future: imagesFuture,
               builder: (context, snapshot) {
+
                 if (snapshot.connectionState == ConnectionState.waiting) {
                   return const Center(child: CircularProgressIndicator());
                 }
+
                 if (snapshot.hasError) {
-                  debugPrint("FutureBuilder hata: ${snapshot.error}");
                   return Center(child: Text("Hata: ${snapshot.error}"));
                 }
+
                 if (!snapshot.hasData || snapshot.data!.isEmpty) {
-                  debugPrint("API boş liste döndü.");
-                  return const Center(child: Text("Hiç görsel bulunamadı."));
+                  return const Center(
+                      child: Text("Bu hastaya ait maske bulunamadı."));
                 }
 
                 final images = snapshot.data!;
-                debugPrint("Toplam kayıt: ${images.length}");
 
                 return GridView.builder(
                   padding: const EdgeInsets.all(10),
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  gridDelegate:
+                  const SliverGridDelegateWithFixedCrossAxisCount(
                     crossAxisCount: 2,
                     mainAxisSpacing: 10,
                     crossAxisSpacing: 10,
                   ),
                   itemCount: images.length,
                   itemBuilder: (context, index) {
-                    final img = (images[index] as Map).cast<String, dynamic>();
+                    final img =
+                    (images[index] as Map).cast<String, dynamic>();
+
                     final imageId = _extractId(img);
-                    final fullUrl = normalizeUrl(
-                        img['mask_url'] ?? img['maskUrl'] ?? img['url']);
-
-                    if (imageId == null) {
-                      debugPrint(
-                          "Uyarı: Kayıtta ID alanı yok. Keys: ${img.keys.toList()}");
-                    }
-                    if ((img['mask_url'] ?? img['maskUrl'] ?? img['url']) ==
-                        null) {
-                      debugPrint(
-                          "Uyarı: Kayıtta URL alanı yok. Keys: ${img.keys.toList()}");
-                    }
-
+                    final fullUrl = normalizeUrl(img['mask_url']);
                     final isSelected = selectedImageId == imageId;
 
                     return GestureDetector(
@@ -139,8 +140,6 @@ class _ImageListPageState extends State<ImageListPage> {
                           selectedImageId = imageId;
                           selectedImageUrl = fullUrl;
                         });
-                        debugPrint("Seçilen ID: $imageId");
-                        debugPrint("Seçilen URL: $fullUrl");
                       },
                       child: Stack(
                         children: [
@@ -184,10 +183,10 @@ class _ImageListPageState extends State<ImageListPage> {
             ),
           ),
 
-          // Altta eylem barı
           if (selectedImageId != null)
             Container(
-              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+              padding:
+              const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
               color: Colors.grey[900],
               child: SafeArea(
                 top: false,
@@ -199,54 +198,61 @@ class _ImageListPageState extends State<ImageListPage> {
                         style: const TextStyle(color: Colors.white),
                       ),
                     ),
-                    const SizedBox(width: 8),
                     ElevatedButton.icon(
                       onPressed: isDeleting
                           ? null
                           : () async {
                         if (selectedImageUrl == null) return;
 
-                        // Flutter'ın ui.Image tipine dönüştürmek için
-                        final networkImage = NetworkImage(selectedImageUrl!);
-                        final completer = Completer<ui.Image>();
-                        networkImage.resolve(const ImageConfiguration()).addListener(
+                        final networkImage =
+                        NetworkImage(selectedImageUrl!);
+
+                        final completer =
+                        Completer<ui.Image>();
+
+                        networkImage
+                            .resolve(const ImageConfiguration())
+                            .addListener(
                           ImageStreamListener((info, _) {
                             completer.complete(info.image);
                           }),
                         );
-                        final uiImage = await completer.future;
 
-                        // Örnek: initialContour boş liste olabilir (henüz düzenleme yapılmadıysa)
-                        final initialContour = <Offset>[];
+                        final uiImage =
+                        await completer.future;
 
                         Navigator.push(
                           context,
                           MaterialPageRoute(
-                            builder: (context) => EditSegmentPage(
-                              image: uiImage,
-                              initialContour: initialContour,
-                              maskId: selectedImageId!,
-                              token: widget.token,
-                            ),
+                            builder: (context) =>
+                                EditSegmentPage(
+                                  image: uiImage,
+                                  initialContour: const [],
+                                  maskId: selectedImageId!,
+                                  token: widget.token,
+                                ),
                           ),
                         );
                       },
                       icon: const Icon(Icons.edit),
                       label: const Text("Düzenle"),
                     ),
-
                     const SizedBox(width: 8),
                     ElevatedButton.icon(
                       style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.red),
-                      onPressed: isDeleting ? null : _deleteSelected,
+                      onPressed:
+                      isDeleting ? null : _deleteSelected,
                       icon: isDeleting
                           ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2))
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2),
+                      )
                           : const Icon(Icons.delete),
-                      label: Text(isDeleting ? "Siliniyor..." : "Sil"),
+                      label: Text(
+                          isDeleting ? "Siliniyor..." : "Sil"),
                     ),
                   ],
                 ),
@@ -255,7 +261,6 @@ class _ImageListPageState extends State<ImageListPage> {
         ],
       ),
 
-      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
       floatingActionButton: selectedImageId == null
           ? FloatingActionButton(
         onPressed: () {
@@ -264,7 +269,7 @@ class _ImageListPageState extends State<ImageListPage> {
             MaterialPageRoute(
               builder: (context) => SegmentPage(
                 token: widget.token,
-                userId: widget.userId,
+                patientId: widget.patientId,
               ),
             ),
           );

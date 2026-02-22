@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:tumor_segmentation_app2/pages/image_list_page.dart';
 import 'services/api_service.dart';
 import 'package:jwt_decoder/jwt_decoder.dart';
+import 'pages/patient_list_page.dart';
 
 void main() {
   runApp(const MyApp());
@@ -50,30 +51,32 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => isLoading = true);
 
     try {
-      final loginData = await api.login(
+      final token = await api.login(
         usernameController.text,
         passwordController.text,
       );
 
       setState(() => isLoading = false);
 
-      if (loginData != null) {
-        String token = loginData["token"];
+      if (token != null) {
 
-        // Token'ı decode et
+        // Token decode (user_id backend token içine koyuyorsa)
         Map<String, dynamic> decodedToken = JwtDecoder.decode(token);
-        int userId = decodedToken['user_id'];
+
+        int? userId = decodedToken['user_id'];
 
         print('User ID: $userId');
 
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Giriş başarılı! Kullanıcı ID: $userId")),
+          const SnackBar(content: Text("Giriş başarılı!")),
         );
 
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
-            builder: (context) => ImageListPage(token: token, userId: userId),
+            builder: (context) => PatientListPage(
+              token: token,
+            ),
           ),
         );
       } else {
@@ -83,10 +86,10 @@ class _LoginScreenState extends State<LoginScreen> {
       }
     } catch (e) {
       setState(() => isLoading = false);
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Bir hata oluştu: $e")),
       );
-      print("Bir hata oluştu: $e");
     }
   }
 
