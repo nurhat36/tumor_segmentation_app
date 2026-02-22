@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart'; // YENİ EKLENDİ
 import 'package:http/http.dart' as http;
+import '../services/api_service.dart';
 
 // EditSegmentPage dosyanızın doğru import edildiğinden emin olun
 import 'EditSegmentPage.dart';
@@ -15,12 +16,14 @@ enum ShapeType { rectangle, circle, oval }
 
 class SegmentPage extends StatefulWidget {
   final String token;
-  final int userId;
+  final int patientId;
+
 
   const SegmentPage({
     super.key,
     required this.token,
-    required this.userId,
+    required this.patientId,
+
   });
 
   @override
@@ -28,6 +31,7 @@ class SegmentPage extends StatefulWidget {
 }
 
 class _SegmentPageState extends State<SegmentPage> {
+  final ApiService apiService = ApiService();
   // Görsel ve Dosya
   File? selectedFile; // Hem resim hem .nii dosyasını tutar
   ui.Image? loadedImage; // Ekranda gösterilen anlık resim (Slice veya PNG)
@@ -96,27 +100,28 @@ class _SegmentPageState extends State<SegmentPage> {
   // Standart Resim Seçme
   Future<void> _pickImage() async {
     final picker = ImagePicker();
-    final picked = await picker.pickImage(source: ImageSource.gallery);
-    if (picked == null) return;
+    final pickedFile =
+    await picker.pickImage(source: ImageSource.gallery);
 
-    setState(() {
-      isLoading = true;
-      selectedFile = File(picked.path);
-      isNiftiMode = false; // Normal resim modu
-      selectionRectImage = null;
-      maskImage = null;
-      maskContours.clear();
-      _transformationController.value = Matrix4.identity();
-    });
+    if (pickedFile == null) return;
 
-    final bytes = await picked.readAsBytes();
-    final codec = await ui.instantiateImageCodec(bytes);
-    final frame = await codec.getNextFrame();
+    try {
+      await apiService.uploadFileToPatient(
+        widget.token,
+        widget.patientId,
+        File(pickedFile.path),
+      );
 
-    setState(() {
-      loadedImage = frame.image;
-      isLoading = false;
-    });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Dosya başarıyla yüklendi")),
+      );
+
+      //_refresh(); // Listeyi yeniden çek
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Hata: $e")),
+      );
+    }
   }
 
   // NIfTI Dosyası Seçme (File Picker ile)
