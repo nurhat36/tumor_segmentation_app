@@ -3,22 +3,43 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 
 class ApiService {
+  // DİKKAT: Eğer sunucunda SSL (HTTPS) yoksa ve direkt 8000 portuna atıyorsan:
+  // "http://oncovisionai.com.tr:8000/api" yapmalısın.
+  // SSL varsa "https://oncovisionai.com.tr/api" yapmalısın.
   final String baseUrl = "http://oncovisionai.com.tr/api";
 
   // ==========================
   // REGISTER
   // ==========================
   Future<bool> register(String username, String password) async {
-    final response = await http.post(
-      Uri.parse("$baseUrl/auth/register"),
-      headers: {"Content-Type": "application/json"},
-      body: jsonEncode({
-        "username": username,
-        "password": password,
-      }),
-    );
+    try {
+      final response = await http.post(
+        Uri.parse("$baseUrl/auth/register"), // Eğer hata devam ederse sonuna '/' ekle: "$baseUrl/auth/register/"
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "username": username,
+          "password": password,
+        }),
+      );
 
-    return response.statusCode == 200;
+      // 1. ADIM: Hatayı konsola yazdırarak neyin ters gittiğini görelim
+      print("--- REGISTER LOG ---");
+      print("Status Code: ${response.statusCode}");
+      print("Response Body: ${response.body}");
+      print("--------------------");
+
+      // 2. ADIM: FastAPI kayıt işleminde 201 (Created) de dönebilir. İkisini de kabul et.
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        return true;
+      } else {
+        // 400 (Kullanıcı zaten var) veya 422 (Geçersiz veri) durumları buraya düşer
+        return false;
+      }
+    } catch (e) {
+      // Sunucuya hiç ulaşılamazsa (Örn: İnternet yok, bağlantı reddedildi)
+      print("Kayıt İsteği Hatası: $e");
+      return false;
+    }
   }
 
   // ==========================
@@ -40,107 +61,16 @@ class ApiService {
       final data = json.decode(response.body);
       return data["access_token"];
     }
-
-    return null;
-  }
-
-
-
-  // ==========================
-  // UPLOAD FILE
-  // ==========================
-  Future<Map<String, dynamic>?> uploadFile(
-      String token, int patientId, File file) async {
-    var request = http.MultipartRequest(
-      "POST",
-      Uri.parse("$baseUrl/files/$patientId"),
-    );
-
-    request.headers["Authorization"] = "Bearer $token";
-
-    request.files.add(
-      await http.MultipartFile.fromPath("file", file.path),
-    );
-
-    var response = await request.send();
-
-    if (response.statusCode == 200) {
-      final respStr = await response.stream.bytesToString();
-      return json.decode(respStr);
-    }
-
     return null;
   }
 
   // ==========================
-  // AUTO SEGMENT
+  // PATIENTS (HASTALAR)
   // ==========================
-  Future<bool> autoSegment(String token, int fileId) async {
-    final response = await http.post(
-      Uri.parse("$baseUrl/segment/$fileId"),
-      headers: {
-        "Authorization": "Bearer $token",
-      },
-    );
-
-    return response.statusCode == 200;
-  }
-
-  // ==========================
-  // MANUAL SEGMENT
-  // ==========================
-  Future<bool> manualSegment(
-      String token, int fileId, File maskFile) async {
-    var request = http.MultipartRequest(
-      "POST",
-      Uri.parse("$baseUrl/segment/manual/$fileId"),
-    );
-
-    request.headers["Authorization"] = "Bearer $token";
-
-    request.files.add(
-      await http.MultipartFile.fromPath("mask_file", maskFile.path),
-    );
-
-    var response = await request.send();
-
-    return response.statusCode == 200;
-  }
-
-  // ==========================
-  // GET MY MASKS
-  // ==========================
-  Future<List<dynamic>> getMyMasks(String token) async {
-    final response = await http.get(
-      Uri.parse("$baseUrl/my-masks"),
-      headers: {
-        "Authorization": "Bearer $token",
-      },
-    );
-
-    if (response.statusCode == 200) {
-      return json.decode(response.body);
-    }
-
-    throw Exception("Maskeler alınamadı");
-  }
-
-  // ==========================
-  // DELETE MASK
-  // ==========================
-  Future<bool> deleteMask(String token, int maskId) async {
-    final response = await http.delete(
-      Uri.parse("$baseUrl/segment/$maskId"),
-      headers: {
-        "Authorization": "Bearer $token",
-      },
-    );
-
-    return response.statusCode == 200;
-  }
   Future<List<dynamic>> getPatients(String token) async {
+    // DÜZELTME: FastAPI yönlendirme (redirect) yapıp token'ı düşürmesin diye sonuna '/' eklendi.
     final response = await http.get(
-      Uri.parse('$baseUrl/patients'),
+      Uri.parse('$baseUrl/patients/'),
       headers: {
         "Authorization": "Bearer $token",
       },
@@ -152,9 +82,10 @@ class ApiService {
       throw Exception("Hastalar alınamadı: ${response.statusCode}");
     }
   }
+
   Future<Map<String, dynamic>> createPatient(String token, String name) async {
     final response = await http.post(
-      Uri.parse('$baseUrl/patients/'),
+      Uri.parse('$baseUrl/patients/'), // Sonunda '/' var
       headers: {
         "Authorization": "Bearer $token",
         "Content-Type": "application/json"
@@ -181,10 +112,13 @@ class ApiService {
       throw Exception("Hasta silinemedi");
     }
   }
-  Future<List<dynamic>> getImagesByPatient(
-      String token, int patientId) async {
+
+  // ==========================
+  // FILES (DOSYALAR / RESİMLER)
+  // ==========================
+  Future<List<dynamic>> getImagesByPatient(String token, int patientId) async {
     final response = await http.get(
-      Uri.parse('$baseUrl/patients/$patientId/images'),
+      Uri.parse('$baseUrl/files/$patientId'), // React fileService.js ile eşlendi
       headers: {
         "Authorization": "Bearer $token",
       },
@@ -196,27 +130,89 @@ class ApiService {
       throw Exception("Bu hastaya ait dosyalar alınamadı");
     }
   }
-  Future<void> uploadFileToPatient(
-      String token, int patientId, File file) async {
 
+  Future<Map<String, dynamic>?> uploadFileToPatient(String token, int patientId, File file) async {
     var request = http.MultipartRequest(
-      'POST',
-      Uri.parse('$baseUrl/files/$patientId'),
+      "POST",
+      Uri.parse("$baseUrl/files/$patientId"),
     );
 
-    request.headers['Authorization'] = 'Bearer $token';
-
-    request.files.add(
-      await http.MultipartFile.fromPath(
-        'file',
-        file.path,
-      ),
-    );
+    request.headers["Authorization"] = "Bearer $token";
+    request.files.add(await http.MultipartFile.fromPath("file", file.path));
 
     var response = await request.send();
 
-    if (response.statusCode != 200) {
-      throw Exception("Upload başarısız");
+    if (response.statusCode == 200) {
+      final respStr = await response.stream.bytesToString();
+      return json.decode(respStr);
     }
+    return null;
+  }
+
+  // ==========================
+  // AUTO SEGMENT (GÜNCELLENDİ)
+  // ==========================
+  Future<bool> autoSegment(String token, int fileId, {Map<String, dynamic>? roiCoords}) async {
+    // DÜZELTME: Backend form-data ve koordinat bekliyor, düz POST değil MultipartRequest kullanılmalı.
+    var request = http.MultipartRequest(
+      "POST",
+      Uri.parse("$baseUrl/segment/$fileId"),
+    );
+
+    request.headers["Authorization"] = "Bearer $token";
+
+    // React'taki ile aynı varsayılan koordinatları gönderiyoruz
+    request.fields['x'] = roiCoords?['x']?.toString() ?? '0';
+    request.fields['y'] = roiCoords?['y']?.toString() ?? '0';
+    request.fields['z'] = roiCoords?['z']?.toString() ?? '0';
+    request.fields['width'] = '64';
+    request.fields['height'] = '64';
+    request.fields['shape'] = 'rectangle';
+
+    var response = await request.send();
+    return response.statusCode == 200;
+  }
+
+  // ==========================
+  // MANUAL SEGMENT
+  // ==========================
+  Future<bool> manualSegment(String token, int fileId, File maskFile) async {
+    var request = http.MultipartRequest(
+      "POST",
+      Uri.parse("$baseUrl/segment/manual/$fileId"),
+    );
+
+    request.headers["Authorization"] = "Bearer $token";
+    request.files.add(await http.MultipartFile.fromPath("mask_file", maskFile.path));
+
+    var response = await request.send();
+    return response.statusCode == 200;
+  }
+
+  // ==========================
+  // MASKS
+  // ==========================
+  Future<List<dynamic>> getMyMasks(String token) async {
+    final response = await http.get(
+      Uri.parse("$baseUrl/my-masks"),
+      headers: {
+        "Authorization": "Bearer $token",
+      },
+    );
+
+    if (response.statusCode == 200) {
+      return json.decode(response.body);
+    }
+    throw Exception("Maskeler alınamadı");
+  }
+
+  Future<bool> deleteMask(String token, int maskId) async {
+    final response = await http.delete(
+      Uri.parse("$baseUrl/segment/$maskId"),
+      headers: {
+        "Authorization": "Bearer $token",
+      },
+    );
+    return response.statusCode == 200;
   }
 }
