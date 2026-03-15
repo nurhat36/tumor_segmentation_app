@@ -56,7 +56,7 @@ class _SegmentPageState extends State<SegmentPage> {
   Rect? selectionRectImage; // Seçim alanı
 
   // API endpoint (Emülatör için 10.0.2.2, Gerçek cihaz için PC IP'si)
-  static const String baseUrl = "http://10.0.2.2:8000";
+  static const String baseUrl = "http://oncovisionai.com.tr/api";
 
   @override
   void dispose() {

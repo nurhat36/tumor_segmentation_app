@@ -29,7 +29,7 @@ class _ImageListPageState extends State<ImageListPage> {
   String? selectedImageUrl;
   bool isDeleting = false;
 
-  final String baseUrl = "http://10.0.2.2:8000";
+  final String baseUrl = "http://oncovisionai.com.tr/api";
 
   @override
   void initState() {
