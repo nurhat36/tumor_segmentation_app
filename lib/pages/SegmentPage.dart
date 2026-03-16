@@ -269,7 +269,6 @@ class _SegmentPageState extends State<SegmentPage> {
       return;
     }
 
-    // Normal resimse ve seçim yapılmadıysa uyar
     if (!isNiftiMode && selectionRectImage == null) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Lütfen bir alan seçin.")));
       return;
@@ -282,26 +281,58 @@ class _SegmentPageState extends State<SegmentPage> {
     });
 
     try {
-      var request = http.MultipartRequest('POST', Uri.parse('$baseUrl/segment'));
-      request.headers['Authorization'] = 'Bearer ${widget.token}';
-      request.files.add(await http.MultipartFile.fromPath('file', selectedFile!.path));
+      // ==========================================================
+      // ADIM 1: DOSYAYI BACKEND'E KAYDET (widget.patientId KULLANARAK)
+      // ==========================================================
+      print("⏳ Dosya ${widget.patientId} numaralı hastaya yükleniyor...");
 
-      // NIfTI ise shape parametreleri önemsizdir ama 0 gönderelim
-      request.fields.addAll({
+      // DİKKAT: URL'ye widget.patientId'yi ekledik!
+      var uploadRequest = http.MultipartRequest('POST', Uri.parse('$baseUrl/files/${widget.patientId}'));
+      uploadRequest.headers['Authorization'] = 'Bearer ${widget.token}';
+      uploadRequest.files.add(await http.MultipartFile.fromPath('file', selectedFile!.path));
+
+      var uploadResponse = await uploadRequest.send();
+      final uploadResponseBody = await http.Response.fromStream(uploadResponse);
+
+      if (uploadResponse.statusCode != 200) {
+        print("❌ Yükleme Hatası: ${uploadResponseBody.body}");
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Dosya yükleme hatası: ${uploadResponse.statusCode}")));
+        setState(() => isSegmenting = false);
+        return;
+      }
+
+      final uploadData = json.decode(uploadResponseBody.body);
+      final int newFileId = uploadData['id'];
+      print("✅ Dosya başarıyla yüklendi. Veritabanı ID'si: $newFileId");
+
+      // ==========================================================
+      // ADIM 2: YÜKLENEN DOSYAYI SEGMENTE ET (newFileId KULLANARAK)
+      // ==========================================================
+      print("🧠 Yapay Zeka analizi başlatılıyor...");
+
+      // DİKKAT: Artık URL'de backend'den gelen yeni dosya ID'sini kullanıyoruz
+      var segmentRequest = http.MultipartRequest('POST', Uri.parse('$baseUrl/segment/$newFileId'));
+      segmentRequest.headers['Authorization'] = 'Bearer ${widget.token}';
+
+      // Koordinatları gönderiyoruz
+      segmentRequest.fields.addAll({
         'x': isNiftiMode ? '0' : selectionRectImage!.left.toString(),
         'y': isNiftiMode ? '0' : selectionRectImage!.top.toString(),
         'width': isNiftiMode ? '0' : selectionRectImage!.width.toString(),
         'height': isNiftiMode ? '0' : selectionRectImage!.height.toString(),
         'shape': selectedShape.toString().split('.').last,
+        'z': '0', // NIfTI için güvenli olması adına Z eksenini de ekledik
       });
 
-      var response = await request.send();
-      final responseBody = await http.Response.fromStream(response);
+      var segmentResponse = await segmentRequest.send();
+      final segmentResponseBody = await http.Response.fromStream(segmentResponse);
 
-      if (response.statusCode == 200) {
-        final responseData = json.decode(responseBody.body);
-        final newMaskId = responseData['mask_id'];
-        final type = responseData['type']; // 'volume' veya null/image
+      if (segmentResponse.statusCode == 200) {
+        final responseData = json.decode(segmentResponseBody.body);
+
+        final maskUrl = responseData['mask_url'];
+        final newMaskId = responseData['mask_id'] ?? newFileId;
+        final type = responseData['type'] ?? 'volume';
 
         setState(() {
           currentMaskId = newMaskId;
@@ -312,17 +343,18 @@ class _SegmentPageState extends State<SegmentPage> {
           await _initNiftiMode(newMaskId);
         } else {
           // --- Normal Resim Modu ---
-          final maskUrl = responseData['mask_url'];
-          final maskResponse = await http.get(Uri.parse('$baseUrl$maskUrl'));
-          await loadMaskImage(maskResponse.bodyBytes);
+          final maskDownloadResponse = await http.get(Uri.parse('$baseUrl$maskUrl'));
+          await loadMaskImage(maskDownloadResponse.bodyBytes);
           setState(() => isNiftiMode = false);
         }
 
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Segmentasyon başarılı!")));
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Hata: ${response.statusCode}")));
+        print("❌ Segmentasyon Hatası: ${segmentResponseBody.body}");
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Segmentasyon Hatası: ${segmentResponse.statusCode}")));
       }
     } catch (e) {
+      print("❌ Kritik Hata: $e");
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Hata: $e")));
     } finally {
       setState(() => isSegmenting = false);
