@@ -315,4 +315,31 @@ class ApiService {
     );
     return response.statusCode == 200;
   }
+  Future<List<dynamic>> getPatientFiles(String token, int patientId) async {
+    final response = await http.get(
+      Uri.parse('$baseUrl/files/$patientId'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    if (response.statusCode == 200) return jsonDecode(response.body);
+    throw Exception('Dosyalar çekilemedi');
+  }
+
+// 2. Bir dosyaya ait tüm maskeleri çeker (Dün yazdığımız yeni router)
+  Future<List<dynamic>> getMasksByFile(String token, int fileId) async {
+    final response = await http.get(
+      Uri.parse('$baseUrl/masks/file/$fileId'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    if (response.statusCode == 200) return jsonDecode(response.body);
+    throw Exception('Maskeler çekilemedi');
+  }
+
+// 3. Dosyayı kalıcı olarak siler (Yukarıda yazdığımız yeni router)
+  Future<void> deleteFile(String token, int fileId) async {
+    final response = await http.delete(
+      Uri.parse('$baseUrl/files/$fileId'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    if (response.statusCode != 200) throw Exception('Dosya silinemedi');
+  }
 }
