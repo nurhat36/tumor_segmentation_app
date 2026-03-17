@@ -1,13 +1,113 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
+import 'package:google_sign_in/google_sign_in.dart';
 
 class ApiService {
   // DİKKAT: Eğer sunucunda SSL (HTTPS) yoksa ve direkt 8000 portuna atıyorsan:
   // "http://oncovisionai.com.tr:8000/api" yapmalısın.
   // SSL varsa "https://oncovisionai.com.tr/api" yapmalısın.
   final String baseUrl = "http://oncovisionai.com.tr/api";
+  final GoogleSignIn _googleSignIn = GoogleSignIn(
+    serverClientId: '636599479269-8f0sbt9dpchjfit9so8la30heiqc8ckl.apps.googleusercontent.com',
+    scopes: ['email', 'profile'],
+  );
 
+  // ==========================
+  // GOOGLE LOGIN (Detaylı Loglu)
+  // ==========================
+  Future<String?> signInWithGoogle() async {
+
+
+    try {
+      // Önceki takılı kalmış oturumları temizle (Gerekirse açabilirsiniz)
+      // await _googleSignIn.signOut();
+
+
+      final GoogleSignInAccount? googleUser = await _googleSignIn.signIn();
+
+      if (googleUser == null) {
+
+        return null;
+      }
+
+
+      final GoogleSignInAuthentication googleAuth = await googleUser.authentication;
+
+      final String? accessToken = googleAuth.accessToken;
+      final String? idToken = googleAuth.idToken;
+
+
+
+      if (accessToken != null) {
+        return await _sendGoogleTokenToBackend(accessToken);
+      } else {
+        return null;
+      }
+    } catch (error, stackTrace) {
+
+      return null;
+    }
+  }
+
+  // Google Access Token'ı FastAPI backend'ine gönderme (Detaylı Loglu)
+  Future<String?> _sendGoogleTokenToBackend(String token) async {
+    final url = Uri.parse('$baseUrl/auth/google');
+
+
+
+    final requestBody = jsonEncode({'token': token});
+
+
+    try {
+
+      final response = await http.post(
+        url,
+        headers: <String, String>{
+          'Content-Type': 'application/json; charset=UTF-8',
+        },
+        body: requestBody,
+      );
+
+
+
+      if (response.statusCode == 200) {
+
+        final responseData = jsonDecode(response.body);
+
+        final String? backendAccessToken = responseData['access_token'];
+
+        if (backendAccessToken != null) {
+
+          return backendAccessToken;
+        } else {
+          return null;
+        }
+
+      } else if (response.statusCode == 422) {
+
+        return null;
+      } else if (response.statusCode == 400) {
+        return null;
+      } else {
+        return null;
+      }
+    } catch (e, stackTrace) {
+
+      return null;
+    }
+  }
+
+  // Google çıkış işlemi
+  Future<void> signOutGoogle() async {
+    try {
+      print('🟡 Google oturumu kapatılıyor...');
+      await _googleSignIn.signOut();
+      print('🟢 Google oturumu başarıyla kapatıldı.');
+    } catch (e) {
+      print('🔴 Google oturum kapatma hatası: $e');
+    }
+  }
   // ==========================
   // REGISTER
   // ==========================
@@ -214,5 +314,32 @@ class ApiService {
       },
     );
     return response.statusCode == 200;
+  }
+  Future<List<dynamic>> getPatientFiles(String token, int patientId) async {
+    final response = await http.get(
+      Uri.parse('$baseUrl/files/$patientId'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    if (response.statusCode == 200) return jsonDecode(response.body);
+    throw Exception('Dosyalar çekilemedi');
+  }
+
+// 2. Bir dosyaya ait tüm maskeleri çeker (Dün yazdığımız yeni router)
+  Future<List<dynamic>> getMasksByFile(String token, int fileId) async {
+    final response = await http.get(
+      Uri.parse('$baseUrl/masks/file/$fileId'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    if (response.statusCode == 200) return jsonDecode(response.body);
+    throw Exception('Maskeler çekilemedi');
+  }
+
+// 3. Dosyayı kalıcı olarak siler (Yukarıda yazdığımız yeni router)
+  Future<void> deleteFile(String token, int fileId) async {
+    final response = await http.delete(
+      Uri.parse('$baseUrl/files/$fileId'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    if (response.statusCode != 200) throw Exception('Dosya silinemedi');
   }
 }

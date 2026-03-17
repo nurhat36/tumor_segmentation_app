@@ -98,26 +98,51 @@ class _SegmentPageState extends State<SegmentPage> {
   }
 
   // Standart Resim Seçme
+  // Standart Resim Seçme (DÜZELTİLDİ)
   Future<void> _pickImage() async {
     final picker = ImagePicker();
-    final pickedFile =
-    await picker.pickImage(source: ImageSource.gallery);
+    final pickedFile = await picker.pickImage(source: ImageSource.gallery);
 
     if (pickedFile == null) return;
 
+    setState(() {
+      isLoading = true; // İşlem bitene kadar ekranda yükleniyor ikonu dönsün
+    });
+
     try {
+      final file = File(pickedFile.path);
+
+      // 1. Dosyayı sunucuya yükle (Senin yazdığın kısım)
       await apiService.uploadFileToPatient(
         widget.token,
         widget.patientId,
-        File(pickedFile.path),
+        file,
       );
+
+      // 2. YENİ EKLENEN KISIM: Resmi ekranda göstermek için ui.Image'e çevir
+      final bytes = await file.readAsBytes();
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+
+      // 3. UI'ı güncelle
+      setState(() {
+        selectedFile = file;             // Backend'e segmentasyona giderken lazım
+        loadedImage = frame.image;       // Ekranda RawImage içinde gösterilecek olan resim
+        isNiftiMode = false;             // Normal resim modundayız
+        maskImage = null;                // Yeni resim geldi, eski maskeleri temizle
+        maskContours.clear();
+        selectionRectImage = null;       // Seçimi sıfırla
+        isLoading = false;               // Yüklemeyi bitir
+      });
 
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Dosya başarıyla yüklendi")),
+        const SnackBar(content: Text("Dosya başarıyla yüklendi ve ekrana getirildi")),
       );
 
-      //_refresh(); // Listeyi yeniden çek
     } catch (e) {
+      setState(() {
+        isLoading = false;
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Hata: $e")),
       );
@@ -496,68 +521,102 @@ class _SegmentPageState extends State<SegmentPage> {
   // ============================================================
 
   void _openEditPage() async {
-    if (loadedImage == null || maskContours.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Düzenlenecek maske yok.")));
-      return;
-    }
+    if (loadedImage == null || maskContours.isEmpty) return;
 
-    final List<Offset> pointsToEdit = List.from(maskContours[0]);
-    final List<Offset>? editedPoints = await Navigator.push(
+    final result = await Navigator.push(
       context,
       MaterialPageRoute(
         builder: (context) => EditSegmentPage(
-          image: loadedImage!,
-          initialContour: pointsToEdit,
+          originalMemoryImage: loadedImage!,
+          initialContour: List.from(maskContours[0]),
           maskId: currentMaskId ?? 0,
           token: widget.token,
         ),
       ),
     );
 
-    if (editedPoints != null) {
-      await _updateMaskFromPoints(editedPoints);
+    if (result != null) {
+      final editedPoints = result['points'] as List<Offset>;
+      final maskBytes = result['maskBytes'] as Uint8List; // Hazır Siyah Beyaz Maske!
 
+      // Ekranda maskeyi hemen güncelle
+      await loadMaskImage(maskBytes);
+      setState(() => maskContours = [editedPoints]);
+
+      // Server'a yolla
       bool success;
       if (isNiftiMode) {
         success = await _updateNiftiSliceOnServer(currentMaskId!, currentSliceIndex);
       } else {
-        success = await _uploadMaskToServer(currentMaskId!);
+        // Normal mod için direkt elimizdeki maskBytes'ı yollayabiliriz
+        var request = http.MultipartRequest('PUT', Uri.parse('$baseUrl/segment/$currentMaskId'));
+        request.headers['Authorization'] = 'Bearer ${widget.token}';
+        request.files.add(http.MultipartFile.fromBytes('file', maskBytes, filename: 'updated_mask.png'));
+        var response = await request.send();
+        success = response.statusCode == 200;
       }
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(success ? "Kaydedildi" : "Hata oluştu")));
-      }
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(success ? "Kaydedildi" : "Hata oluştu")));
     }
   }
 
   void _startManualDrawing() async {
     // Manuel çizim sadece Normal PNG veya Tekil Slice üzerinde çalışır
-    // Mantık EditPage ile aynıdır, sadece boş liste göndeririz.
     if (loadedImage == null) return;
 
-    final List<Offset>? manualPoints = await Navigator.push(
+    // 1. Yeni EditSegmentPage yapısına göre çağırıyoruz
+    final result = await Navigator.push(
       context,
       MaterialPageRoute(
         builder: (context) => EditSegmentPage(
-          image: loadedImage!,
-          initialContour: [],
+          originalMemoryImage: loadedImage!, // DÜZELTME: memoryImage yerine originalMemoryImage oldu
+          initialContour: const [],
           maskId: currentMaskId ?? 0,
           token: widget.token,
         ),
       ),
     );
 
-    if (manualPoints != null && manualPoints.isNotEmpty) {
-      await _updateMaskFromPoints(manualPoints);
+    // 2. Eğer kullanıcı "Kaydet"e bastıysa ve sonuç döndüyse
+    if (result != null) {
+      final manualPoints = result['points'] as List<Offset>;
+      final maskBytes = result['maskBytes'] as Uint8List;
 
-      // NIfTI ise o anki slice'ı güncelle, değilse yeni maske oluştur
-      bool success;
-      if (isNiftiMode && currentMaskId != null) {
-        success = await _updateNiftiSliceOnServer(currentMaskId!, currentSliceIndex);
-      } else if (currentMaskId == null) {
-        success = await _createManualMaskOnServer(); // Bu fonksiyonu yukarıdaki orijinal kodundan kopyala/yapıştır yapabilirsin
-      } else {
-        success = await _uploadMaskToServer(currentMaskId!);
+      if (manualPoints.isEmpty) return; // Çizgi çizmeden kaydettiyse işlem yapma
+
+      // 3. Üretilen siyah/beyaz maskeyi beklemeden ekranda göster
+      await loadMaskImage(maskBytes);
+      setState(() {
+        maskContours = [manualPoints];
+      });
+
+      // 4. Server'a Kaydetme İşlemi
+      bool success = false;
+      try {
+        if (isNiftiMode && currentMaskId != null) {
+          // NIfTI slice güncellemesi
+          success = await _updateNiftiSliceOnServer(currentMaskId!, currentSliceIndex);
+        } else if (currentMaskId == null) {
+          // İLK DEFA maske oluşturuluyorsa (Backend tarafında POST ile yeni kayıt açılmalı)
+          // Not: Mevcut _createManualMaskOnServer metodunuzu maskBytes alacak şekilde güncellemeniz gerekebilir.
+          // Geçici olarak bu bloğu kendi yapınıza göre uyarlayabilirsiniz:
+          success = await _createManualMaskOnServer();
+        } else {
+          // Var olan maskeyi manuel çizimle GÜNCELLEME
+          var request = http.MultipartRequest('PUT', Uri.parse('$baseUrl/segment/$currentMaskId'));
+          request.headers['Authorization'] = 'Bearer ${widget.token}';
+          request.files.add(http.MultipartFile.fromBytes('file', maskBytes, filename: 'manual_mask.png'));
+          var response = await request.send();
+          success = response.statusCode == 200;
+        }
+      } catch (e) {
+        print("Manuel çizim kaydetme hatası: $e");
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(success ? "Manuel çizim kaydedildi!" : "Kaydetme hatası oluştu."))
+        );
       }
     }
   }
