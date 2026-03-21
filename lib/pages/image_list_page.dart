@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import '../services/api_service.dart';
 import 'EditSegmentPage.dart';
 import 'SegmentPage.dart';
+import 'NiftiSliceSelectorPage.dart';
 
 class ImageListPage extends StatefulWidget {
   final String token;
@@ -194,9 +195,20 @@ class _ImageListPageState extends State<ImageListPage> {
                                   IconButton(
                                     icon: const Icon(Icons.edit, color: Colors.orangeAccent),
                                     onPressed: isNifti ? () {
-                                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("3D MR (NIfTI) dosyaları mobilde düzenlenemez, Web panelini kullanın.")));
+                                      // NIfTI ise yeni oluşturduğumuz kesit seçici sayfaya git!
+                                      Navigator.push(
+                                        context,
+                                        MaterialPageRoute(
+                                          builder: (context) => NiftiSliceSelectorPage(
+                                            fileId: fileData['id'],
+                                            maskId: mask['id'],
+                                            token: widget.token,
+                                            filename: fileData['filename'],
+                                          ),
+                                        ),
+                                      );
                                     } : () {
-                                      // DÜZELTİLDİ: Artık _navigateToEdit fonksiyonumuzu çağırıyoruz!
+                                      // 2D PNG ise direkt senin EditSegmentPage sayfana git
                                       _navigateToEdit(mask, fileData);
                                     },
                                   ),

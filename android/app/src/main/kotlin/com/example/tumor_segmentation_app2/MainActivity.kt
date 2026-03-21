@@ -1,4 +1,4 @@
-package com.example.tumor_segmentation_app2
+package tr.com.nurhatbaydag.oncovisionai
 
 import io.flutter.embedding.android.FlutterActivity
 
