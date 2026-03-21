@@ -50,6 +50,9 @@ class _SegmentPageState extends State<SegmentPage> {
   int totalSlices = 0;      // Toplam kesit sayısı
   int currentSliceIndex = 0; // Şu anki kesit
 
+  int? currentFileId;         // Dosya yüklenir yüklenmez ID'sini tutacak
+  double sliderValue = 0.0;   // Slider performans (DDoS) çözümü için
+
   // --- Zoom ve Mod Kontrolü ---
   final TransformationController _transformationController = TransformationController();
   bool _isPanMode = true; // True: Gezinme, False: Seçim
@@ -152,36 +155,63 @@ class _SegmentPageState extends State<SegmentPage> {
   // NIfTI Dosyası Seçme (File Picker ile)
   Future<void> _pickNiftiFile() async {
     try {
-      FilePickerResult? result = await FilePicker.platform.pickFiles(
-        type: FileType.any, // .nii uzantısı için custom filtre bazen sorun çıkarabilir, any en garantisi
-      );
+      FilePickerResult? result = await FilePicker.platform.pickFiles(type: FileType.any);
 
       if (result != null && result.files.single.path != null) {
         String path = result.files.single.path!;
 
-        // Uzantı kontrolü
         if (!path.endsWith('.nii') && !path.endsWith('.nii.gz')) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Lütfen .nii veya .nii.gz uzantılı dosya seçin.")),
-          );
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Lütfen .nii veya .nii.gz uzantılı dosya seçin.")));
           return;
         }
 
         setState(() {
           selectedFile = File(path);
-          isNiftiMode = true; // NIfTI modunu aktifleştir ama henüz yüklenmedi
-          loadedImage = null; // Henüz görüntü yok (Segment'e basınca gelecek)
+          isNiftiMode = true;
+          isLoading = true; // Yükleme ekranı başlasın
+          loadedImage = null;
           maskImage = null;
           maskContours.clear();
+          currentMaskId = null;
+          currentFileId = null;
           selectionRectImage = null;
         });
 
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("${result.files.single.name} seçildi. İşlemek için 'Oynat' butonuna basın.")),
-        );
+        // 1. Dosyayı hemen sunucuya yükle
+        var uploadReq = http.MultipartRequest('POST', Uri.parse('$baseUrl/files/${widget.patientId}'));
+        uploadReq.headers['Authorization'] = 'Bearer ${widget.token}';
+        uploadReq.files.add(await http.MultipartFile.fromPath('file', path));
+
+        var uploadRes = await uploadReq.send();
+        if (uploadRes.statusCode == 200) {
+          final resData = json.decode(await uploadRes.stream.bytesToString());
+          currentFileId = resData['id'];
+
+          // 2. Sunucudan toplam kesit sayısını öğren (Backend'e yeni eklediğiniz ham info API'si)
+          final infoRes = await http.get(
+              Uri.parse('$baseUrl/files/nifti/$currentFileId/info'),
+              headers: {'Authorization': 'Bearer ${widget.token}'}
+          );
+
+          if (infoRes.statusCode == 200) {
+            final infoData = json.decode(infoRes.body);
+            setState(() {
+              totalSlices = infoData['total_slices'];
+              currentSliceIndex = (totalSlices / 2).floor(); // Ortadaki kesiti bul
+              sliderValue = currentSliceIndex.toDouble();    // Slider çubuğunu ortaya al
+            });
+
+            // 3. Ortadaki kesiti ekrana bas
+            await _loadSliceData(currentSliceIndex);
+          }
+        } else {
+          throw Exception("Yükleme başarısız: ${uploadRes.statusCode}");
+        }
       }
     } catch (e) {
-      print("Dosya seçme hatası: $e");
+      print("Dosya yükleme hatası: $e");
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Hata: $e")));
+      setState(() => isLoading = false);
     }
   }
 
@@ -293,7 +323,6 @@ class _SegmentPageState extends State<SegmentPage> {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Önce bir dosya seçin.")));
       return;
     }
-
     if (!isNiftiMode && selectionRectImage == null) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Lütfen bir alan seçin.")));
       return;
@@ -306,47 +335,48 @@ class _SegmentPageState extends State<SegmentPage> {
     });
 
     try {
+      int fileIdToSegment;
+
       // ==========================================================
-      // ADIM 1: DOSYAYI BACKEND'E KAYDET (widget.patientId KULLANARAK)
+      // ADIM 1: EĞER DOSYA DAHA ÖNCE YÜKLENMEDİYSE YÜKLE (NIfTI zaten yüklenmiş olacak)
       // ==========================================================
-      print("⏳ Dosya ${widget.patientId} numaralı hastaya yükleniyor...");
+      if (currentFileId != null) {
+        // NIfTI dosyası zaten _pickNiftiFile içinde yüklendi, tekrar yüklemeye gerek yok!
+        fileIdToSegment = currentFileId!;
+      } else {
+        // Normal PNG resim ise şimdi yüklüyoruz
+        print("⏳ Dosya yükleniyor...");
+        var uploadRequest = http.MultipartRequest('POST', Uri.parse('$baseUrl/files/${widget.patientId}'));
+        uploadRequest.headers['Authorization'] = 'Bearer ${widget.token}';
+        uploadRequest.files.add(await http.MultipartFile.fromPath('file', selectedFile!.path));
 
-      // DİKKAT: URL'ye widget.patientId'yi ekledik!
-      var uploadRequest = http.MultipartRequest('POST', Uri.parse('$baseUrl/files/${widget.patientId}'));
-      uploadRequest.headers['Authorization'] = 'Bearer ${widget.token}';
-      uploadRequest.files.add(await http.MultipartFile.fromPath('file', selectedFile!.path));
+        var uploadResponse = await uploadRequest.send();
+        final uploadResponseBody = await http.Response.fromStream(uploadResponse);
 
-      var uploadResponse = await uploadRequest.send();
-      final uploadResponseBody = await http.Response.fromStream(uploadResponse);
-
-      if (uploadResponse.statusCode != 200) {
-        print("❌ Yükleme Hatası: ${uploadResponseBody.body}");
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Dosya yükleme hatası: ${uploadResponse.statusCode}")));
-        setState(() => isSegmenting = false);
-        return;
+        if (uploadResponse.statusCode != 200) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Dosya yükleme hatası")));
+          setState(() => isSegmenting = false);
+          return;
+        }
+        final uploadData = json.decode(uploadResponseBody.body);
+        fileIdToSegment = uploadData['id'];
+        currentFileId = fileIdToSegment; // Bir daha basılırsa tekrar yüklemesin
       }
 
-      final uploadData = json.decode(uploadResponseBody.body);
-      final int newFileId = uploadData['id'];
-      print("✅ Dosya başarıyla yüklendi. Veritabanı ID'si: $newFileId");
-
       // ==========================================================
-      // ADIM 2: YÜKLENEN DOSYAYI SEGMENTE ET (newFileId KULLANARAK)
+      // ADIM 2: SEGMENTASYON (YAPAY ZEKA) İSTEĞİNİ AT
       // ==========================================================
       print("🧠 Yapay Zeka analizi başlatılıyor...");
-
-      // DİKKAT: Artık URL'de backend'den gelen yeni dosya ID'sini kullanıyoruz
-      var segmentRequest = http.MultipartRequest('POST', Uri.parse('$baseUrl/segment/$newFileId'));
+      var segmentRequest = http.MultipartRequest('POST', Uri.parse('$baseUrl/segment/$fileIdToSegment'));
       segmentRequest.headers['Authorization'] = 'Bearer ${widget.token}';
 
-      // Koordinatları gönderiyoruz
       segmentRequest.fields.addAll({
         'x': isNiftiMode ? '0' : selectionRectImage!.left.toString(),
         'y': isNiftiMode ? '0' : selectionRectImage!.top.toString(),
         'width': isNiftiMode ? '0' : selectionRectImage!.width.toString(),
         'height': isNiftiMode ? '0' : selectionRectImage!.height.toString(),
         'shape': selectedShape.toString().split('.').last,
-        'z': '0', // NIfTI için güvenli olması adına Z eksenini de ekledik
+        'z': '0',
       });
 
       var segmentResponse = await segmentRequest.send();
@@ -356,31 +386,25 @@ class _SegmentPageState extends State<SegmentPage> {
         final responseData = json.decode(segmentResponseBody.body);
 
         final maskUrl = responseData['mask_url'];
-        final newMaskId = responseData['mask_id'] ?? newFileId;
-        final type = responseData['type'] ?? 'volume';
+        final newMaskId = responseData['mask_id'] ?? fileIdToSegment;
 
-        setState(() {
-          currentMaskId = newMaskId;
-        });
+        setState(() => currentMaskId = newMaskId);
 
-        if (type == 'volume' || (selectedFile!.path.endsWith('.nii') || selectedFile!.path.endsWith('.nii.gz'))) {
-          // --- NIfTI Modunu Başlat ---
-          await _initNiftiMode(newMaskId);
+        if (isNiftiMode) {
+          // --- NIfTI Modu: O anki kesiti MASKELİ haliyle tekrar yükle ---
+          await _loadSliceData(currentSliceIndex);
         } else {
           // --- Normal Resim Modu ---
           final maskDownloadResponse = await http.get(Uri.parse('$baseUrl$maskUrl'));
           await loadMaskImage(maskDownloadResponse.bodyBytes);
           setState(() => isNiftiMode = false);
         }
-
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Segmentasyon başarılı!")));
       } else {
-        print("❌ Segmentasyon Hatası: ${segmentResponseBody.body}");
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Segmentasyon Hatası: ${segmentResponse.statusCode}")));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Hata: ${segmentResponse.statusCode}")));
       }
     } catch (e) {
-      print("❌ Kritik Hata: $e");
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Hata: $e")));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Kritik Hata: $e")));
     } finally {
       setState(() => isSegmenting = false);
     }
@@ -409,33 +433,34 @@ class _SegmentPageState extends State<SegmentPage> {
     }
   }
 
-  // NIfTI: Belirli bir kesiti yükle
   Future<void> _loadSliceData(int index) async {
-    if (currentMaskId == null) return;
     setState(() => isLoading = true);
 
     try {
-      // 1. Orijinal Görüntü
-      final originalRes = await http.get(
-          Uri.parse('$baseUrl/segment/nifti/$currentMaskId/slice/$index?type=original'),
-          headers: {'Authorization': 'Bearer ${widget.token}'}
-      );
+      if (currentMaskId != null) {
+        // --- SEGMENTASYON YAPILMIŞSA (Maske var) ---
+        final originalRes = await http.get(Uri.parse('$baseUrl/segment/nifti/$currentMaskId/slice/$index?type=original'), headers: {'Authorization': 'Bearer ${widget.token}'});
+        final maskRes = await http.get(Uri.parse('$baseUrl/segment/nifti/$currentMaskId/slice/$index?type=mask'), headers: {'Authorization': 'Bearer ${widget.token}'});
 
-      // 2. Maske
-      final maskRes = await http.get(
-          Uri.parse('$baseUrl/segment/nifti/$currentMaskId/slice/$index?type=mask'),
-          headers: {'Authorization': 'Bearer ${widget.token}'}
-      );
+        if (originalRes.statusCode == 200 && maskRes.statusCode == 200) {
+          final codec = await ui.instantiateImageCodec(originalRes.bodyBytes);
+          final frame = await codec.getNextFrame();
+          setState(() => loadedImage = frame.image);
+          await loadMaskImage(maskRes.bodyBytes);
+        }
+      } else if (currentFileId != null) {
+        // --- HENÜZ SEGMENTASYON YOKSA (Sadece ham görüntü var) ---
+        final rawRes = await http.get(Uri.parse('$baseUrl/files/nifti/$currentFileId/slice/$index'), headers: {'Authorization': 'Bearer ${widget.token}'});
 
-      if (originalRes.statusCode == 200 && maskRes.statusCode == 200) {
-        final codec = await ui.instantiateImageCodec(originalRes.bodyBytes);
-        final frame = await codec.getNextFrame();
-
-        setState(() {
-          loadedImage = frame.image;
-        });
-
-        await loadMaskImage(maskRes.bodyBytes);
+        if (rawRes.statusCode == 200) {
+          final codec = await ui.instantiateImageCodec(rawRes.bodyBytes);
+          final frame = await codec.getNextFrame();
+          setState(() {
+            loadedImage = frame.image;
+            maskImage = null;
+            maskContours.clear();
+          });
+        }
       }
     } catch (e) {
       print("Slice Load Error: $e");
@@ -729,23 +754,27 @@ class _SegmentPageState extends State<SegmentPage> {
           ),
 
           // --- SLIDER (Sadece NIfTI Modunda) ---
+          // --- SLIDER (Sadece NIfTI Modunda) ---
           if (isNiftiMode && totalSlices > 0)
             Container(
               color: Colors.black87,
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
               child: Column(
                 children: [
-                  Text("Kesit: $currentSliceIndex / $totalSlices", style: const TextStyle(color: Colors.white)),
+                  Text("Kesit: ${sliderValue.toInt()} / ${totalSlices - 1}", style: const TextStyle(color: Colors.white)),
                   Slider(
-                    value: currentSliceIndex.toDouble(),
+                    value: sliderValue,
                     min: 0,
                     max: (totalSlices - 1).toDouble(),
                     activeColor: Colors.orange,
                     onChanged: (val) {
-                      setState(() => currentSliceIndex = val.toInt());
+                      // Kaydırırken sadece görsel sayı ve çubuk değişsin (Sunucuya istek gitmez)
+                      setState(() => sliderValue = val);
                     },
                     onChangeEnd: (val) {
-                      _loadSliceData(val.toInt());
+                      // Parmağı bırakınca sunucuya istek gitsin!
+                      setState(() => currentSliceIndex = val.toInt());
+                      _loadSliceData(currentSliceIndex);
                     },
                   ),
                 ],
