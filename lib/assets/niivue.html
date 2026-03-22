@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <script src="./js/niivue.umd.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: black;
+            overflow-x: hidden;
+            overflow-y: hidden; /* Varsayılan: scroll kapalı */
+        }
+
+        #container { position: relative; width: 100vw; }
+
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh; /* Başlangıçta tam ekran */
+            outline: none;
+            transition: height 0.3s ease;
+        }
+
+        /* ─── YENİ: KAYDIRMA ÇUBUĞU (Scroll Zone) ─── */
+        /* NiiVue resme dokunmayı engellediği için sağ kenara kaydırma alanı ekliyoruz */
+        #scrollZone {
+            display: none; /* Sadece çoklu planda açılacak */
+            position: fixed;
+            right: 0;
+            top: 0;
+            width: 45px;
+            height: 100vh;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(4px);
+            z-index: 9999;
+            color: white;
+            font-family: sans-serif;
+            font-size: 14px;
+            font-weight: bold;
+            letter-spacing: 2px;
+            text-align: center;
+            writing-mode: vertical-rl;
+            text-orientation: mixed;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            box-shadow: -3px 0px 10px rgba(0,0,0,0.8);
+            touch-action: pan-y; /* Sadece dikey kaydırmaya izin ver */
+        }
+    </style>
+</head>
+<body>
+
+<!-- Sağ Kenardaki Kaydırma Alanı -->
+<div id="scrollZone" style="display: none;">↕ KAYDIR ↕</div>
+
+<div id="container">
+    <canvas id="gl"></canvas>
+</div>
+
+<script>
+    var nv;
+
+    // 1. NiiVue Motorunu Başlat
+    try {
+        nv = new niivue.Niivue({
+            logging: true,
+            backColor: [0, 0, 0, 1],
+            show3Dcrosshair: true,
+            multiplanarLayout: 1, // Alt alta
+            multiplanarPadPixels: 5 // Aralarındaki boşluk
+        });
+        nv.attachTo('gl');
+    } catch(e) { console.error("Motor hatası:", e); }
+
+    // 2. Flutter Köprüsü
+    var bridgeCheckInterval = setInterval(function() {
+        if (window.FlutterChannel) {
+            clearInterval(bridgeCheckInterval);
+            window.FlutterChannel.postMessage("READY");
+        }
+    }, 100);
+
+    // 3. Dosya Yükle
+    async function loadLocalData(serverPort, fileName) {
+        try {
+            var fileUrl = "http://127.0.0.1:" + serverPort + "/" + encodeURIComponent(fileName);
+            await nv.loadVolumes([{ url: fileUrl, name: fileName, colorMap: 'gray' }]);
+
+            // Yüklendiğinde Çoklu Plana Geç
+            changeViewMode('multiplanar');
+
+            if (window.FlutterChannel) window.FlutterChannel.postMessage("LOADED");
+        } catch (e) {
+            if (window.FlutterChannel) window.FlutterChannel.postMessage("ERROR: " + e.message);
+        }
+    }
+
+    // 4. Maske Yükle
+    async function addMask(maskUrl, token) {
+        try {
+            var res = await fetch(maskUrl, { headers: { 'Authorization': 'Bearer ' + token }});
+            if (!res.ok) return;
+            var blob = await res.blob();
+            var objUrl = URL.createObjectURL(blob);
+            await nv.addVolumeFromUrl({ url: objUrl, name: 'mask.nii', colorMap: 'red', opacity: 0.5 });
+        } catch (e) {}
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // 5. GÖRÜNÜM MODU (BÜYÜTME İŞLEMİ BURADA)
+    // ═══════════════════════════════════════════════════════
+    function changeViewMode(mode) {
+        if (!nv) return;
+
+        var canvas = document.getElementById('gl');
+        var scrollZone = document.getElementById('scrollZone');
+
+        if (mode === 'multiplanar') {
+            // ─── ÇOKLU PLAN: 3 Panel Alt Alta ───
+            // Canvas yüksekliğini tam 3 EKRAN BOYUTU (300vh) yapıyoruz!
+            // Böylece NiiVue bunu 3'e böldüğünde her biri 1 tam ekran olur.
+            canvas.style.height = '300vh';
+            document.body.style.overflowY = 'auto'; // Kaydırmayı aç
+            scrollZone.style.display = 'flex';      // Sağdaki kaydırma çubuğunu göster
+
+            nv.opts.multiplanarLayout = 1;          // Alt alta dizilim
+            nv.opts.multiplanarForceRender = false;
+            nv.setSliceType(nv.sliceTypeMultiplanar);
+
+        } else if (mode === 'multiplanar3d') {
+            // ─── 3 PANEL + 3D = 4 Panel ───
+            canvas.style.height = '400vh'; // 4 ekran boyutu
+            document.body.style.overflowY = 'auto';
+            scrollZone.style.display = 'flex';
+
+            nv.opts.multiplanarLayout = 1;
+            nv.opts.multiplanarForceRender = true;
+            nv.setSliceType(nv.sliceTypeMultiplanar);
+
+        } else {
+            // ─── TEKLİ GÖRÜNÜM (Axial, Coronal vs.) ───
+            canvas.style.height = '100vh'; // Tek ekran boyutu
+            document.body.style.overflowY = 'hidden'; // Kaydırmayı kapat
+            scrollZone.style.display = 'none';        // Çubuğu gizle
+
+            if (mode === '3d')          nv.setSliceType(nv.sliceTypeRender);
+            else if (mode === 'axial')   nv.setSliceType(nv.sliceTypeAxial);
+            else if (mode === 'coronal') nv.setSliceType(nv.sliceTypeCoronal);
+            else if (mode === 'sagittal') nv.setSliceType(nv.sliceTypeSagittal);
+        }
+
+        // Boyut değişti, NiiVue'ya motoru güncellemesini söyle
+        setTimeout(function() {
+            nv.resizeListener();
+            nv.drawScene();
+        }, 150);
+    }
+</script>
+</body>
+</html>

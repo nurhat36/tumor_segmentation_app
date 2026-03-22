@@ -41,6 +41,8 @@ dependencies:
   path_provider: ^2.1.5
   file_picker: ^8.0.0
   google_sign_in: ^6.0.0
+  webview_flutter: ^4.13.0
+  path: ^1.8.3
 
 
 dev_dependencies:
@@ -59,6 +61,11 @@ dev_dependencies:
 
 # The following section is specific to Flutter packages.
 flutter:
+  assets:
+    - lib/assets/niivue.html
+    - lib/assets/js/niivue.umd.js
+
+
 
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in
