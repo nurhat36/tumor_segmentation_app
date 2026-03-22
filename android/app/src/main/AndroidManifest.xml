@@ -1,8 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
-        android:label="tumor_segmentation_app2"
+        android:label="oncovisionai"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">  <!-- İŞTE BURAYA EKLİYORUZ -->
         <activity
             android:name=".MainActivity"
             android:exported="true"

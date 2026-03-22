@@ -45,6 +45,16 @@ class _SegmentPageState extends State<SegmentPage> {
   bool showMask = true;
   ShapeType selectedShape = ShapeType.rectangle;
 
+
+
+  // --- NIfTI (3D MR) Değişkenleri ---
+
+
+  // YENİ EKLENENLER: 3 Eksen için takip değişkenleri
+  String activeAxis = 'axial'; // Varsayılan: 'axial', 'coronal' veya 'sagittal'
+  Map<String, int> totalSlicesMap = {'axial': 0, 'coronal': 0, 'sagittal': 0};
+  Map<String, int> currentSliceMap = {'axial': 0, 'coronal': 0, 'sagittal': 0};
+
   // --- NIfTI (3D MR) Değişkenleri ---
   bool isNiftiMode = false; // Şu an NIfTI mı görüntülüyoruz?
   int totalSlices = 0;      // Toplam kesit sayısı
@@ -98,6 +108,26 @@ class _SegmentPageState extends State<SegmentPage> {
         );
       },
     );
+  }
+  // YENİ: Eksen değiştirildiğinde çalışacak fonksiyon
+  void _changeAxis(String newAxis) {
+    if (activeAxis == newAxis) return; // Zaten o eksendeyse işlem yapma
+
+    setState(() {
+      activeAxis = newAxis;
+      totalSlices = totalSlicesMap[newAxis]!;
+      currentSliceIndex = currentSliceMap[newAxis]!;
+      sliderValue = currentSliceIndex.toDouble();
+
+      // Yeni resim gelene kadar ekranı temizle
+      loadedImage = null;
+      maskImage = null;
+      maskContours.clear();
+      isLoading = true;
+    });
+
+    // Yeni eksenin ilgili kesitini sunucudan çek
+    _loadSliceData(currentSliceIndex);
   }
 
   // Standart Resim Seçme
@@ -188,6 +218,7 @@ class _SegmentPageState extends State<SegmentPage> {
           currentFileId = resData['id'];
 
           // 2. Sunucudan toplam kesit sayısını öğren (Backend'e yeni eklediğiniz ham info API'si)
+          // 2. Sunucudan 3 eksenin de boyutlarını öğren
           final infoRes = await http.get(
               Uri.parse('$baseUrl/files/nifti/$currentFileId/info'),
               headers: {'Authorization': 'Bearer ${widget.token}'}
@@ -196,12 +227,22 @@ class _SegmentPageState extends State<SegmentPage> {
           if (infoRes.statusCode == 200) {
             final infoData = json.decode(infoRes.body);
             setState(() {
-              totalSlices = infoData['total_slices'];
-              currentSliceIndex = (totalSlices / 2).floor(); // Ortadaki kesiti bul
-              sliderValue = currentSliceIndex.toDouble();    // Slider çubuğunu ortaya al
+              // Backend'in 3 eksen boyutunu da döndüğünü varsayıyoruz
+              totalSlicesMap['axial'] = infoData['axial_slices'] ?? infoData['total_slices'] ?? 0;
+              totalSlicesMap['coronal'] = infoData['coronal_slices'] ?? totalSlicesMap['axial']!;
+              totalSlicesMap['sagittal'] = infoData['sagittal_slices'] ?? totalSlicesMap['axial']!;
+
+              // Her eksen için başlangıçta ortadaki kesiti ayarla
+              currentSliceMap['axial'] = (totalSlicesMap['axial']! / 2).floor();
+              currentSliceMap['coronal'] = (totalSlicesMap['coronal']! / 2).floor();
+              currentSliceMap['sagittal'] = (totalSlicesMap['sagittal']! / 2).floor();
+
+              // Aktif ekseni ayarla
+              totalSlices = totalSlicesMap[activeAxis]!;
+              currentSliceIndex = currentSliceMap[activeAxis]!;
+              sliderValue = currentSliceIndex.toDouble();
             });
 
-            // 3. Ortadaki kesiti ekrana bas
             await _loadSliceData(currentSliceIndex);
           }
         } else {
@@ -371,12 +412,13 @@ class _SegmentPageState extends State<SegmentPage> {
       segmentRequest.headers['Authorization'] = 'Bearer ${widget.token}';
 
       segmentRequest.fields.addAll({
-        'x': isNiftiMode ? '0' : selectionRectImage!.left.toString(),
-        'y': isNiftiMode ? '0' : selectionRectImage!.top.toString(),
-        'width': isNiftiMode ? '0' : selectionRectImage!.width.toString(),
-        'height': isNiftiMode ? '0' : selectionRectImage!.height.toString(),
+        // Seçim varsa NIfTI modunda da koordinatları gönder
+        'x': selectionRectImage != null ? selectionRectImage!.left.toString() : '0',
+        'y': selectionRectImage != null ? selectionRectImage!.top.toString() : '0',
+        'width': selectionRectImage != null ? selectionRectImage!.width.toString() : '0',
+        'height': selectionRectImage != null ? selectionRectImage!.height.toString() : '0',
         'shape': selectedShape.toString().split('.').last,
-        'z': '0',
+        'axis': isNiftiMode ? activeAxis : 'axial', // Hangi eksenden çizildi?
       });
 
       var segmentResponse = await segmentRequest.send();
@@ -438,9 +480,11 @@ class _SegmentPageState extends State<SegmentPage> {
 
     try {
       if (currentMaskId != null) {
-        // --- SEGMENTASYON YAPILMIŞSA (Maske var) ---
-        final originalRes = await http.get(Uri.parse('$baseUrl/segment/nifti/$currentMaskId/slice/$index?type=original'), headers: {'Authorization': 'Bearer ${widget.token}'});
-        final maskRes = await http.get(Uri.parse('$baseUrl/segment/nifti/$currentMaskId/slice/$index?type=mask'), headers: {'Authorization': 'Bearer ${widget.token}'});
+        // Maske varsa
+        final originalRes = await http.get(Uri.parse('$baseUrl/segment/nifti/$currentMaskId/slice/$index?type=original&axis=$activeAxis'), headers: {'Authorization': 'Bearer ${widget.token}'});
+        final maskRes = await http.get(Uri.parse('$baseUrl/segment/nifti/$currentMaskId/slice/$index?type=mask&axis=$activeAxis'), headers: {'Authorization': 'Bearer ${widget.token}'});
+
+
 
         if (originalRes.statusCode == 200 && maskRes.statusCode == 200) {
           final codec = await ui.instantiateImageCodec(originalRes.bodyBytes);
@@ -449,8 +493,8 @@ class _SegmentPageState extends State<SegmentPage> {
           await loadMaskImage(maskRes.bodyBytes);
         }
       } else if (currentFileId != null) {
-        // --- HENÜZ SEGMENTASYON YOKSA (Sadece ham görüntü var) ---
-        final rawRes = await http.get(Uri.parse('$baseUrl/files/nifti/$currentFileId/slice/$index'), headers: {'Authorization': 'Bearer ${widget.token}'});
+        // Maske yoksa (Sadece ham görüntü)
+        final rawRes = await http.get(Uri.parse('$baseUrl/files/nifti/$currentFileId/slice/$index?axis=$activeAxis'), headers: {'Authorization': 'Bearer ${widget.token}'});
 
         if (rawRes.statusCode == 200) {
           final codec = await ui.instantiateImageCodec(rawRes.bodyBytes);
@@ -655,6 +699,19 @@ class _SegmentPageState extends State<SegmentPage> {
     final dy = (box.height - h * s) / 2.0;
     return (scale: s, offset: Offset(dx, dy));
   }
+  Widget _buildAxisButton(String axis, String label) {
+    bool isActive = activeAxis == axis;
+    return ElevatedButton(
+      style: ElevatedButton.styleFrom(
+        backgroundColor: isActive ? Colors.blue : Colors.grey[800],
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        minimumSize: Size.zero,
+      ),
+      onPressed: () => _changeAxis(axis),
+      child: Text(label, style: const TextStyle(fontSize: 12)),
+    );
+  }
 
   // ============================================================
   // 🖥️ UI BUILD
@@ -666,21 +723,36 @@ class _SegmentPageState extends State<SegmentPage> {
         title: Text(isNiftiMode ? "MR Analiz (3D)" : "Görüntü Analizi"),
         backgroundColor: isNiftiMode ? Colors.indigo[900] : Colors.blue,
         actions: [
-          // NIfTI modunda seçim yapmaya gerek yok, sadece pan/zoom
-          if (!isNiftiMode)
-            IconButton(
-              icon: Icon(_isPanMode ? Icons.pan_tool : Icons.crop_free),
-              onPressed: () => setState(() => _isPanMode = !_isPanMode),
-            ),
+          // NIfTI Modunda da çizim yapabilmek için bunu if (!isNiftiMode) dışına çıkardık:
+          IconButton(
+            icon: Icon(_isPanMode ? Icons.pan_tool : Icons.crop_free),
+            onPressed: () => setState(() => _isPanMode = !_isPanMode),
+          ),
           const SizedBox(width: 8),
           IconButton(
             icon: const Icon(Icons.upload_file),
-            onPressed: _showUploadOptions, // Güncellenen upload menüsü
+            onPressed: _showUploadOptions,
           ),
         ],
       ),
       body: Column(
         children: [
+          // --- EKSEN SEÇİCİ (Sadece NIfTI modunda görünür) ---
+          if (isNiftiMode && !isLoading)
+            Container(
+              color: Colors.black87,
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  _buildAxisButton('axial', 'Üstten (Axial)'),
+                  const SizedBox(width: 8),
+                  _buildAxisButton('coronal', 'Önden (Coronal)'),
+                  const SizedBox(width: 8),
+                  _buildAxisButton('sagittal', 'Yandan (Sagittal)'),
+                ],
+              ),
+            ),
           // --- GÖRÜNTÜ ALANI ---
           Expanded(
             child: isLoading
@@ -710,21 +782,24 @@ class _SegmentPageState extends State<SegmentPage> {
                   child: InteractiveViewer(
                     transformationController: _transformationController,
                     minScale: 0.1, maxScale: 10.0,
-                    panEnabled: isNiftiMode ? true : _isPanMode, // NIfTI'de hep Pan açık
+
+                    // YENİ: NIfTI'de hep Pan açık değil, butona bağladık
+                    panEnabled: _isPanMode,
 
                     child: SizedBox(
                       width: contentW,
                       height: contentH,
                       child: GestureDetector(
-                        // NIfTI modunda seçim yapılmaz
-                        onPanStart: (!isNiftiMode && !_isPanMode) ? (details) {
+                        // YENİ: !isNiftiMode şartlarını kaldırdık
+                        onPanStart: (!_isPanMode) ? (details) {
                           final pImg = details.localPosition / fit.scale;
                           setState(() {
                             selectionRectImage = Rect.fromLTWH(pImg.dx, pImg.dy, 0, 0);
                             maskImage = null; maskContours.clear();
                           });
                         } : null,
-                        onPanUpdate: (!isNiftiMode && !_isPanMode && selectionRectImage != null) ? (details) {
+
+                        onPanUpdate: (!_isPanMode && selectionRectImage != null) ? (details) {
                           final pImg = details.localPosition / fit.scale;
                           final imgW = loadedImage!.width.toDouble();
                           final imgH = loadedImage!.height.toDouble();
@@ -768,12 +843,15 @@ class _SegmentPageState extends State<SegmentPage> {
                     max: (totalSlices - 1).toDouble(),
                     activeColor: Colors.orange,
                     onChanged: (val) {
-                      // Kaydırırken sadece görsel sayı ve çubuk değişsin (Sunucuya istek gitmez)
-                      setState(() => sliderValue = val);
+                      setState(() {
+                        sliderValue = val;
+                      });
                     },
                     onChangeEnd: (val) {
-                      // Parmağı bırakınca sunucuya istek gitsin!
-                      setState(() => currentSliceIndex = val.toInt());
+                      setState(() {
+                        currentSliceIndex = val.toInt();
+                        currentSliceMap[activeAxis] = currentSliceIndex; // YENİ EKLENDİ
+                      });
                       _loadSliceData(currentSliceIndex);
                     },
                   ),
