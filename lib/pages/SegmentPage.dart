@@ -11,6 +11,7 @@ import '../services/api_service.dart';
 
 // EditSegmentPage dosyanızın doğru import edildiğinden emin olun
 import 'EditSegmentPage.dart';
+import 'NiiVueMobileViewer.dart';
 
 enum ShapeType { rectangle, circle, oval }
 
@@ -66,7 +67,12 @@ class _SegmentPageState extends State<SegmentPage> {
   // --- Zoom ve Mod Kontrolü ---
   final TransformationController _transformationController = TransformationController();
   bool _isPanMode = true; // True: Gezinme, False: Seçim
-  Rect? selectionRectImage; // Seçim alanı
+  // 3 Eksen için ayrı ayrı çizilen alanları (ROI) tutar
+  Map<String, Rect?> axisSelections = {
+    'axial': null,
+    'coronal': null,
+    'sagittal': null
+  };
 
   // API endpoint (Emülatör için 10.0.2.2, Gerçek cihaz için PC IP'si)
   static const String baseUrl = "http://oncovisionai.com.tr/api";
@@ -130,8 +136,6 @@ class _SegmentPageState extends State<SegmentPage> {
     _loadSliceData(currentSliceIndex);
   }
 
-  // Standart Resim Seçme
-  // Standart Resim Seçme (DÜZELTİLDİ)
   Future<void> _pickImage() async {
     final picker = ImagePicker();
     final pickedFile = await picker.pickImage(source: ImageSource.gallery);
@@ -152,19 +156,29 @@ class _SegmentPageState extends State<SegmentPage> {
         file,
       );
 
-      // 2. YENİ EKLENEN KISIM: Resmi ekranda göstermek için ui.Image'e çevir
+      // 2. Resmi ekranda göstermek için ui.Image'e çevir
       final bytes = await file.readAsBytes();
       final codec = await ui.instantiateImageCodec(bytes);
       final frame = await codec.getNextFrame();
 
       // 3. UI'ı güncelle
       setState(() {
-        selectedFile = file;             // Backend'e segmentasyona giderken lazım
-        loadedImage = frame.image;       // Ekranda RawImage içinde gösterilecek olan resim
-        isNiftiMode = false;             // Normal resim modundayız
-        maskImage = null;                // Yeni resim geldi, eski maskeleri temizle
+        selectedFile = file;
+        loadedImage = frame.image;
+        isNiftiMode = false;
+        maskImage = null;
         maskContours.clear();
-        selectionRectImage = null;       // Seçimi sıfırla
+
+        // 🔥 HATA BURADAYDI: Eski selectionRectImage silindi, yerine bunu sıfırlıyoruz:
+        axisSelections = {
+          'axial': null,
+          'coronal': null,
+          'sagittal': null
+        };
+
+        activeAxis = 'axial'; // 2D resimler varsayılan olarak axial kabul edilir
+        currentFileId = null;
+        currentMaskId = null;
         isLoading = false;               // Yüklemeyi bitir
       });
 
@@ -204,7 +218,14 @@ class _SegmentPageState extends State<SegmentPage> {
           maskContours.clear();
           currentMaskId = null;
           currentFileId = null;
-          selectionRectImage = null;
+
+          // 🔥 HATA BURADAYDI: selectionRectImage yerine yeni sistemi sıfırlıyoruz:
+          axisSelections = {
+            'axial': null,
+            'coronal': null,
+            'sagittal': null
+          };
+          activeAxis = 'axial'; // Varsayılan olarak hep üstten (axial) başlat
         });
 
         // 1. Dosyayı hemen sunucuya yükle
@@ -217,7 +238,6 @@ class _SegmentPageState extends State<SegmentPage> {
           final resData = json.decode(await uploadRes.stream.bytesToString());
           currentFileId = resData['id'];
 
-          // 2. Sunucudan toplam kesit sayısını öğren (Backend'e yeni eklediğiniz ham info API'si)
           // 2. Sunucudan 3 eksenin de boyutlarını öğren
           final infoRes = await http.get(
               Uri.parse('$baseUrl/files/nifti/$currentFileId/info'),
@@ -364,8 +384,10 @@ class _SegmentPageState extends State<SegmentPage> {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Önce bir dosya seçin.")));
       return;
     }
-    if (!isNiftiMode && selectionRectImage == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Lütfen bir alan seçin.")));
+    if (!isNiftiMode && axisSelections['axial'] == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Lütfen bir alan seçin."))
+      );
       return;
     }
 
@@ -412,13 +434,29 @@ class _SegmentPageState extends State<SegmentPage> {
       segmentRequest.headers['Authorization'] = 'Bearer ${widget.token}';
 
       segmentRequest.fields.addAll({
-        // Seçim varsa NIfTI modunda da koordinatları gönder
-        'x': selectionRectImage != null ? selectionRectImage!.left.toString() : '0',
-        'y': selectionRectImage != null ? selectionRectImage!.top.toString() : '0',
-        'width': selectionRectImage != null ? selectionRectImage!.width.toString() : '0',
-        'height': selectionRectImage != null ? selectionRectImage!.height.toString() : '0',
+        // ESKİ SİSTEM (2D PNG resimler için gerekli)
+        'x': axisSelections['axial']?.left.toString() ?? '0',
+        'y': axisSelections['axial']?.top.toString() ?? '0',
+        'width': axisSelections['axial']?.width.toString() ?? '0',
+        'height': axisSelections['axial']?.height.toString() ?? '0',
+
+        // YENİ SİSTEM (3D NIfTI için)
+        'ax_x': axisSelections['axial']?.left.toString() ?? '0',
+        'ax_y': axisSelections['axial']?.top.toString() ?? '0',
+        'ax_w': axisSelections['axial']?.width.toString() ?? '0',
+        'ax_h': axisSelections['axial']?.height.toString() ?? '0',
+
+        'cor_x': axisSelections['coronal']?.left.toString() ?? '0',
+        'cor_y': axisSelections['coronal']?.top.toString() ?? '0',
+        'cor_w': axisSelections['coronal']?.width.toString() ?? '0',
+        'cor_h': axisSelections['coronal']?.height.toString() ?? '0',
+
+        'sag_x': axisSelections['sagittal']?.left.toString() ?? '0',
+        'sag_y': axisSelections['sagittal']?.top.toString() ?? '0',
+        'sag_w': axisSelections['sagittal']?.width.toString() ?? '0',
+        'sag_h': axisSelections['sagittal']?.height.toString() ?? '0',
+
         'shape': selectedShape.toString().split('.').last,
-        'axis': isNiftiMode ? activeAxis : 'axial', // Hangi eksenden çizildi?
       });
 
       var segmentResponse = await segmentRequest.send();
@@ -689,6 +727,29 @@ class _SegmentPageState extends State<SegmentPage> {
       }
     }
   }
+  // YENİ EKLENEN 3D AÇMA FONKSİYONU
+  void _open3DViewer() {
+    if (selectedFile == null) return;
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => Scaffold(
+          appBar: AppBar(
+            title: const Text("3D Hacim", style: TextStyle(color: Colors.white)),
+            backgroundColor: Colors.black,
+            iconTheme: const IconThemeData(color: Colors.white),
+          ),
+          backgroundColor: Colors.black,
+          body: NiiVueMobileViewer(
+            localFilePath: selectedFile!.path,
+            maskUrl: currentMaskId != null ? '$baseUrl/segment/nifti/$currentMaskId/download' : null,
+            token: widget.token,
+          ),
+        ),
+      ),
+    );
+  }
 
   ({double scale, Offset offset}) _fit(Size box) {
     if (loadedImage == null) return (scale: 1.0, offset: Offset.zero);
@@ -738,19 +799,37 @@ class _SegmentPageState extends State<SegmentPage> {
       body: Column(
         children: [
           // --- EKSEN SEÇİCİ (Sadece NIfTI modunda görünür) ---
+          // --- EKSEN SEÇİCİ VE 3D BUTONU (Sadece NIfTI modunda görünür) ---
           if (isNiftiMode && !isLoading)
             Container(
               color: Colors.black87,
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  _buildAxisButton('axial', 'Üstten (Axial)'),
-                  const SizedBox(width: 8),
-                  _buildAxisButton('coronal', 'Önden (Coronal)'),
-                  const SizedBox(width: 8),
-                  _buildAxisButton('sagittal', 'Yandan (Sagittal)'),
-                ],
+              padding: const EdgeInsets.symmetric(vertical: 8, horizontal:55),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal, // Telefon ekranı küçükse yana kaysın
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _buildAxisButton('axial', 'Üstten'),
+                    const SizedBox(width: 8),
+                    _buildAxisButton('coronal', 'Önden'),
+                    const SizedBox(width: 8),
+                    _buildAxisButton('sagittal', 'Yandan'),
+                    const SizedBox(width: 16), // 3D butonuna biraz daha boşluk
+
+                    // 🔥 YENİ EKLENEN 3D BUTONU 🔥
+                    ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.orange, // Dikkat çekici renk
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        minimumSize: Size.zero,
+                      ),
+                      icon: const Icon(Icons.view_in_ar, size: 16),
+                      label: const Text('3D Gör', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                      onPressed: _open3DViewer,
+                    ),
+                  ],
+                ),
               ),
             ),
           // --- GÖRÜNTÜ ALANI ---
@@ -790,22 +869,23 @@ class _SegmentPageState extends State<SegmentPage> {
                       width: contentW,
                       height: contentH,
                       child: GestureDetector(
-                        // YENİ: !isNiftiMode şartlarını kaldırdık
                         onPanStart: (!_isPanMode) ? (details) {
                           final pImg = details.localPosition / fit.scale;
                           setState(() {
-                            selectionRectImage = Rect.fromLTWH(pImg.dx, pImg.dy, 0, 0);
+                            // Hangi eksendeysek onun karesini sıfırla ve başlat
+                            axisSelections[activeAxis] = Rect.fromLTWH(pImg.dx, pImg.dy, 0, 0);
                             maskImage = null; maskContours.clear();
                           });
                         } : null,
 
-                        onPanUpdate: (!_isPanMode && selectionRectImage != null) ? (details) {
+                        onPanUpdate: (!_isPanMode && axisSelections[activeAxis] != null) ? (details) {
                           final pImg = details.localPosition / fit.scale;
                           final imgW = loadedImage!.width.toDouble();
                           final imgH = loadedImage!.height.toDouble();
                           setState(() {
-                            selectionRectImage = Rect.fromPoints(
-                              Offset(selectionRectImage!.left, selectionRectImage!.top),
+                            // Hangi eksendeysek onun karesini güncelle
+                            axisSelections[activeAxis] = Rect.fromPoints(
+                              Offset(axisSelections[activeAxis]!.left, axisSelections[activeAxis]!.top),
                               Offset(pImg.dx.clamp(0.0, imgW), pImg.dy.clamp(0.0, imgH)),
                             );
                           });
@@ -816,8 +896,14 @@ class _SegmentPageState extends State<SegmentPage> {
                             Positioned.fill(child: RawImage(image: loadedImage, fit: BoxFit.contain)),
                             if (maskContours.isNotEmpty && showMask)
                               Positioned.fill(child: CustomPaint(painter: _MaskOutlinePainter(maskContours, fit.scale))),
-                            if (selectionRectImage != null && maskImage == null)
-                              Positioned.fill(child: CustomPaint(painter: _SelectionPainter(rect: selectionRectImage!, scale: fit.scale))),
+
+                            // Aktif eksenin karesini çiz (Eğer varsa)
+                            if (axisSelections[activeAxis] != null && maskImage == null)
+                              Positioned.fill(
+                                  child: CustomPaint(
+                                      painter: _SelectionPainter(rect: axisSelections[activeAxis]!, scale: fit.scale)
+                                  )
+                              ),
                           ],
                         ),
                       ),

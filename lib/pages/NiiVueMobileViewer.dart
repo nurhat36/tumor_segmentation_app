@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
-import 'package:flutter/foundation.dart';    // ← YENİ
-import 'package:flutter/gestures.dart';      // ← YENİ
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:path/path.dart' as p;
@@ -10,14 +10,13 @@ class NiiVueMobileViewer extends StatefulWidget {
   final String localFilePath;
   final String? maskUrl;
   final String token;
-  final String viewMode;
 
+  // viewMode parametresini sildik, çünkü artık sadece 3D kullanıyoruz
   const NiiVueMobileViewer({
     super.key,
     required this.localFilePath,
     this.maskUrl,
     required this.token,
-    required this.viewMode,
   });
 
   @override
@@ -29,7 +28,7 @@ class _NiiVueMobileViewerState extends State<NiiVueMobileViewer> {
   HttpServer? _localServer;
   int _serverPort = 0;
   bool _isWebViewReady = false;
-  String _statusMessage = "Hazırlanıyor...";
+  String _statusMessage = "3D Motor Hazırlanıyor...";
 
   @override
   void initState() {
@@ -46,11 +45,7 @@ class _NiiVueMobileViewerState extends State<NiiVueMobileViewer> {
   @override
   void didUpdateWidget(covariant NiiVueMobileViewer oldWidget) {
     super.didUpdateWidget(oldWidget);
-
-    if (oldWidget.viewMode != widget.viewMode && _isWebViewReady) {
-      _controller.runJavaScript("changeViewMode('${widget.viewMode}');");
-    }
-
+    // Sadece dosya yolu değişirse WebView'ı güncelle
     if (oldWidget.localFilePath != widget.localFilePath && _isWebViewReady) {
       _loadNiftiFile();
     }
@@ -107,10 +102,11 @@ class _NiiVueMobileViewerState extends State<NiiVueMobileViewer> {
   }
 
   void _initWebView() {
-    setState(() => _statusMessage = "WebView yükleniyor...");
+    setState(() => _statusMessage = "3D Görünüm Yükleniyor...");
 
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(Colors.black)
       ..addJavaScriptChannel(
         'FlutterChannel',
         onMessageReceived: (JavaScriptMessage message) {
@@ -126,6 +122,7 @@ class _NiiVueMobileViewerState extends State<NiiVueMobileViewer> {
           }
         },
       )
+    // 🔥 DÜZELTİLEN KISIM BURASI: (pubspec.yaml'deki yola göre)
       ..loadFlutterAsset('lib/assets/niivue.html');
 
     setState(() {});
@@ -135,24 +132,19 @@ class _NiiVueMobileViewerState extends State<NiiVueMobileViewer> {
     if (!_isWebViewReady) return;
 
     final fileName = p.basename(widget.localFilePath);
-    setState(() => _statusMessage = "MR dosyası yükleniyor...");
+    setState(() => _statusMessage = "3D Model Oluşturuluyor...");
 
+    // 1. Ana NIfTI dosyasını yükle
     _controller.runJavaScript("loadLocalData($_serverPort, '$fileName');");
 
+    // 2. Segmentasyon maskesi varsa üstüne ekle
     if (widget.maskUrl != null) {
       Future.delayed(const Duration(seconds: 2), () {
         _controller.runJavaScript("addMask('${widget.maskUrl}', '${widget.token}');");
       });
     }
-
-    Future.delayed(const Duration(milliseconds: 500), () {
-      _controller.runJavaScript("changeViewMode('${widget.viewMode}');");
-    });
   }
 
-  // ═══════════════════════════════════════════════════
-  // ★ BUILD - GestureRecognizers ile Scroll Desteği ★
-  // ═══════════════════════════════════════════════════
   @override
   Widget build(BuildContext context) {
     if (_serverPort == 0) {
@@ -170,34 +162,34 @@ class _NiiVueMobileViewerState extends State<NiiVueMobileViewer> {
 
     return Stack(
       children: [
-        // ─── ★ gestureRecognizers EKLENDİ ★ ───
+        // Tam ekran 3D obje
         WebViewWidget(
           controller: _controller,
           gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
-            // Tüm gesture'ları WebView'a gönder
-            // (scroll, pan, zoom hepsi WebView içinde çalışsın)
             Factory<EagerGestureRecognizer>(() => EagerGestureRecognizer()),
           },
         ),
 
+        // Sadece yükleme aşamasında görünen bildirim kutusu
         if (_statusMessage.isNotEmpty)
           Positioned(
-            bottom: 10, left: 10, right: 10,
+            bottom: 20, left: 20, right: 20,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: BoxDecoration(
                 color: Colors.black87,
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.blueAccent.withOpacity(0.5)),
               ),
               child: Row(
                 children: [
                   const SizedBox(
-                    width: 16, height: 16,
+                    width: 20, height: 20,
                     child: CircularProgressIndicator(strokeWidth: 2, color: Colors.blueAccent),
                   ),
-                  const SizedBox(width: 10),
+                  const SizedBox(width: 16),
                   Expanded(
-                    child: Text(_statusMessage, style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                    child: Text(_statusMessage, style: const TextStyle(color: Colors.white, fontSize: 14)),
                   ),
                 ],
               ),
