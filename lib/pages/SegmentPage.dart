@@ -551,6 +551,19 @@ class _SegmentPageState extends State<SegmentPage> {
     }
   }
 
+  // YENİ EKLENDİ: Oklar için kesit değiştirme fonksiyonu
+  void _changeSlice(int delta) {
+    int newSlice = currentSliceIndex + delta;
+    if (newSlice >= 0 && newSlice < totalSlices) {
+      setState(() {
+        currentSliceIndex = newSlice;
+        sliderValue = newSlice.toDouble();
+        currentSliceMap[activeAxis] = currentSliceIndex;
+      });
+      _loadSliceData(newSlice);
+    }
+  }
+
   // NIfTI: Düzenlenmiş kesiti güncelle
   Future<bool> _updateNiftiSliceOnServer(int maskId, int sliceIndex) async {
     if (maskImage == null) return false;
@@ -635,9 +648,15 @@ class _SegmentPageState extends State<SegmentPage> {
       MaterialPageRoute(
         builder: (context) => EditSegmentPage(
           originalMemoryImage: loadedImage!,
-          initialContour: List.from(maskContours[0]),
+          // Güvenlik önlemi: Eğer maske yoksa çökmek yerine boş liste gönderir
+          initialContour: maskContours.isNotEmpty ? List.from(maskContours[0]) : const [],
           maskId: currentMaskId ?? 0,
           token: widget.token,
+          isNiftiMode: isNiftiMode,
+          activeAxis: activeAxis,
+          niftiFilePath: selectedFile?.path,
+          totalSlicesMap: totalSlicesMap,
+          currentSliceMap: currentSliceMap,
         ),
       ),
     );
@@ -676,10 +695,15 @@ class _SegmentPageState extends State<SegmentPage> {
       context,
       MaterialPageRoute(
         builder: (context) => EditSegmentPage(
-          originalMemoryImage: loadedImage!, // DÜZELTME: memoryImage yerine originalMemoryImage oldu
-          initialContour: const [],
+          originalMemoryImage: loadedImage!,
+          initialContour: const [], // Manuel çizim olduğu için her zaman boş başlar
           maskId: currentMaskId ?? 0,
           token: widget.token,
+          isNiftiMode: isNiftiMode,
+          activeAxis: activeAxis,
+          niftiFilePath: selectedFile?.path,
+          totalSlicesMap: totalSlicesMap,
+          currentSliceMap: currentSliceMap,
         ),
       ),
     );
@@ -915,31 +939,49 @@ class _SegmentPageState extends State<SegmentPage> {
           ),
 
           // --- SLIDER (Sadece NIfTI Modunda) ---
-          // --- SLIDER (Sadece NIfTI Modunda) ---
           if (isNiftiMode && totalSlices > 0)
             Container(
               color: Colors.black87,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5), // padding'i 16'dan 8'e düşürdüm oklar sığsın diye
               child: Column(
                 children: [
                   Text("Kesit: ${sliderValue.toInt()} / ${totalSlices - 1}", style: const TextStyle(color: Colors.white)),
-                  Slider(
-                    value: sliderValue,
-                    min: 0,
-                    max: (totalSlices - 1).toDouble(),
-                    activeColor: Colors.orange,
-                    onChanged: (val) {
-                      setState(() {
-                        sliderValue = val;
-                      });
-                    },
-                    onChangeEnd: (val) {
-                      setState(() {
-                        currentSliceIndex = val.toInt();
-                        currentSliceMap[activeAxis] = currentSliceIndex; // YENİ EKLENDİ
-                      });
-                      _loadSliceData(currentSliceIndex);
-                    },
+                  Row( // SLIDER'I BİR SATIR (ROW) İÇİNE ALDIK
+                    children: [
+                      // SOL OK (GERİ)
+                      IconButton(
+                        icon: const Icon(Icons.arrow_back_ios, color: Colors.orange, size: 20),
+                        onPressed: () => _changeSlice(-1),
+                      ),
+
+                      // ORTADAKİ SLIDER
+                      Expanded(
+                        child: Slider(
+                          value: sliderValue,
+                          min: 0,
+                          max: (totalSlices - 1).toDouble(),
+                          activeColor: Colors.orange,
+                          onChanged: (val) {
+                            setState(() {
+                              sliderValue = val;
+                            });
+                          },
+                          onChangeEnd: (val) {
+                            setState(() {
+                              currentSliceIndex = val.toInt();
+                              currentSliceMap[activeAxis] = currentSliceIndex;
+                            });
+                            _loadSliceData(currentSliceIndex);
+                          },
+                        ),
+                      ),
+
+                      // SAĞ OK (İLERİ)
+                      IconButton(
+                        icon: const Icon(Icons.arrow_forward_ios, color: Colors.orange, size: 20),
+                        onPressed: () => _changeSlice(1),
+                      ),
+                    ],
                   ),
                 ],
               ),

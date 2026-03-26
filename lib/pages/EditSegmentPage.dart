@@ -2,6 +2,9 @@ import 'dart:ui' as ui;
 import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'NiiVueMobileViewer.dart';
+import 'package:http/http.dart' as http;
+
 
 class EditSegmentPage extends StatefulWidget {
   final String? originalImageUrl;
@@ -11,6 +14,12 @@ class EditSegmentPage extends StatefulWidget {
   final int maskId;
   final String token;
 
+  final bool isNiftiMode;
+  final String activeAxis;
+  final String? niftiFilePath;
+  final Map<String, int>? totalSlicesMap;
+  final Map<String, int>? currentSliceMap;
+
   const EditSegmentPage({
     super.key,
     this.originalImageUrl,
@@ -19,6 +28,12 @@ class EditSegmentPage extends StatefulWidget {
     required this.initialContour,
     required this.maskId,
     required this.token,
+
+    this.isNiftiMode = false, // Varsayılan olarak normal resim kabul eder
+    this.activeAxis = 'axial',
+    this.niftiFilePath,
+    this.totalSlicesMap,
+    this.currentSliceMap,
   });
 
   @override
@@ -40,6 +55,13 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
   int? _activePointIndex;
   double _currentScale = 1.0;
 
+  int _currentSliceIndex = 0;
+  int _totalSlices = 0;
+  String _activeAxis = 'axial';
+  late Map<String, int> _currentSliceMap;
+  late Map<String, int> _totalSlicesMap;
+  static const String baseUrl = "http://oncovisionai.com.tr/api";
+
   @override
   void initState() {
     super.initState();
@@ -49,6 +71,15 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
 
   Future<void> _initializeData() async {
     try {
+
+      if (widget.isNiftiMode && widget.totalSlicesMap != null) {
+        _activeAxis = widget.activeAxis;
+        _totalSlicesMap = Map.from(widget.totalSlicesMap!);
+        _currentSliceMap = Map.from(widget.currentSliceMap!);
+        _totalSlices = _totalSlicesMap[_activeAxis]!;
+        _currentSliceIndex = _currentSliceMap[_activeAxis]!;
+      }
+
       // 1. Orijinal Arka Plan Resmini Yükle
       if (widget.originalMemoryImage != null) {
         _loadedImage = widget.originalMemoryImage;
@@ -172,6 +203,113 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
   }
 
   // ========================================================
+  // YENİ EKLENEN NIfTI FONKSİYONLARI
+  // ========================================================
+  Future<bool> _saveCurrentSliceSilently() async {
+    if (!widget.isNiftiMode || widget.maskId == 0 || _loadedImage == null) return true;
+    final width = _loadedImage!.width.toDouble();
+    final height = _loadedImage!.height.toDouble();
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    canvas.drawRect(Rect.fromLTWH(0, 0, width, height), Paint()..color = Colors.black);
+
+    if (editablePoints.isNotEmpty) {
+      final path = Path()..moveTo(editablePoints[0].dx, editablePoints[0].dy);
+      for (int i = 1; i < editablePoints.length; i++) path.lineTo(editablePoints[i].dx, editablePoints[i].dy);
+      path.close();
+      canvas.drawPath(path, Paint()..color = Colors.white..style = PaintingStyle.fill);
+    }
+    final newMaskImage = await recorder.endRecording().toImage(width.toInt(), height.toInt());
+    final byteData = await newMaskImage.toByteData(format: ui.ImageByteFormat.png);
+    final pngBytes = byteData!.buffer.asUint8List();
+
+    try {
+      var request = http.MultipartRequest('POST', Uri.parse('$baseUrl/segment/nifti/${widget.maskId}/slice/$_currentSliceIndex/update?axis=$_activeAxis'));
+      request.headers['Authorization'] = 'Bearer ${widget.token}';
+      request.files.add(http.MultipartFile.fromBytes('file', pngBytes, filename: 'slice_update.png'));
+      var response = await request.send();
+      return response.statusCode == 200;
+    } catch (e) { return false; }
+  }
+
+  Future<void> _fetchSlice(int index, String axis) async {
+    try {
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final originalRes = await http.get(Uri.parse('$baseUrl/segment/nifti/${widget.maskId}/slice/$index?type=original&axis=$axis&t=$timestamp'), headers: {'Authorization': 'Bearer ${widget.token}'});
+      final maskRes = await http.get(Uri.parse('$baseUrl/segment/nifti/${widget.maskId}/slice/$index?type=mask&axis=$axis&t=$timestamp'), headers: {'Authorization': 'Bearer ${widget.token}'});
+
+      if (originalRes.statusCode == 200 && maskRes.statusCode == 200) {
+        final codec = await ui.instantiateImageCodec(originalRes.bodyBytes);
+        final frame = await codec.getNextFrame();
+        _loadedImage = frame.image;
+
+        final maskCodec = await ui.instantiateImageCodec(maskRes.bodyBytes);
+        final maskFrame = await maskCodec.getNextFrame();
+        editablePoints = await _extractContourFromMask(maskFrame.image);
+        _history = [List.from(editablePoints)];
+        _historyIndex = 0; _activePointIndex = null;
+      }
+    } catch (e) { print(e); } finally { setState(() => _isLoading = false); }
+  }
+
+  void _changeSlice(int delta) async {
+    int newSlice = _currentSliceIndex + delta;
+    if (newSlice >= 0 && newSlice < _totalSlices) {
+      setState(() => _isLoading = true);
+      await _saveCurrentSliceSilently();
+      _currentSliceIndex = newSlice;
+      _currentSliceMap[_activeAxis] = newSlice;
+      await _fetchSlice(newSlice, _activeAxis);
+    }
+  }
+
+  void _changeAxis(String newAxis) async {
+    if (_activeAxis == newAxis) return;
+    setState(() => _isLoading = true);
+    await _saveCurrentSliceSilently();
+    _activeAxis = newAxis;
+    _totalSlices = _totalSlicesMap[newAxis]!;
+    _currentSliceIndex = _currentSliceMap[newAxis]!;
+    await _fetchSlice(_currentSliceIndex, _activeAxis);
+  }
+
+  // ========================================================
+  // YENİ: 3D ve EKSEN KONTROLLERİ
+  // ========================================================
+  void _open3DViewer() {
+    if (widget.niftiFilePath == null) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => Scaffold(
+          appBar: AppBar(title: const Text("3D Hacim", style: TextStyle(color: Colors.white)), backgroundColor: Colors.black, iconTheme: const IconThemeData(color: Colors.white)),
+          backgroundColor: Colors.black,
+          body: NiiVueMobileViewer(
+            localFilePath: widget.niftiFilePath!,
+            maskUrl: null,
+            token: widget.token,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAxisButton(String axis, String label) {
+    bool isActive = _activeAxis == axis;
+    return ElevatedButton(
+      style: ElevatedButton.styleFrom(
+          backgroundColor: isActive ? Colors.blue : Colors.grey[800],
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          minimumSize: Size.zero
+      ),
+      onPressed: () => _changeAxis(axis), // Tıklandığında aktif olarak ekseni değiştirir
+      child: Text(label, style: const TextStyle(fontSize: 12)),
+    );
+  }
+
+
+  // ========================================================
   // KAYDET: Noktalardan yeni Siyah/Beyaz maske üretip geri yollar
   // ========================================================
   Future<void> _saveEdit() async {
@@ -202,9 +340,12 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
     final pngBytes = byteData!.buffer.asUint8List();
 
     // Hem noktaları hem de hazır siyah/beyaz PNG dosyasını geri gönderiyoruz!
+    // Hem noktaları hem de hazır siyah/beyaz PNG dosyasını geri gönderiyoruz!
     Navigator.pop(context, {
       'points': editablePoints,
       'maskBytes': pngBytes,
+      'activeAxis': widget.isNiftiMode ? _activeAxis : null,
+      'currentSliceMap': widget.isNiftiMode ? _currentSliceMap : null,
     });
   }
 
@@ -257,50 +398,131 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
           IconButton(icon: const Icon(Icons.check), onPressed: _saveEdit),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => setState(() { _isEditMode = !_isEditMode; _activePointIndex = null; }),
-        backgroundColor: _isEditMode ? Colors.green : Colors.blue,
-        icon: Icon(_isEditMode ? Icons.done : Icons.edit),
-        label: Text(_isEditMode ? "Bitir" : "Düzenle"),
+      floatingActionButton: Padding(
+        padding: const EdgeInsets.only(bottom: 30.0), // 30.0 değerini artırarak daha da yukarı alabilirsin
+        child: FloatingActionButton.extended(
+          onPressed: () => setState(() { _isEditMode = !_isEditMode; _activePointIndex = null; }),
+          backgroundColor: _isEditMode ? Colors.green : Colors.blue,
+          icon: Icon(_isEditMode ? Icons.done : Icons.edit),
+          label: Text(_isEditMode ? "Bitir" : "Düzenle"),
+        ),
       ),
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          final double baseScale = (constraints.maxWidth / imgW < constraints.maxHeight / imgH) ? constraints.maxWidth / imgW : constraints.maxHeight / imgH;
-          return Center(
-            child: InteractiveViewer(
-              transformationController: _transformationController,
-              minScale: 0.1, maxScale: 20.0, panEnabled: !_isEditMode,
-              child: SizedBox(
-                width: imgW * baseScale, height: imgH * baseScale,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onPanStart: _isEditMode ? (d) { final i = _findNearestPoint(d.localPosition, baseScale); if (i != null) setState(() => _activePointIndex = i); } : null,
-                  onPanUpdate: (_isEditMode && _activePointIndex != null) ? (d) {
-                    final delta = d.delta / baseScale / _currentScale;
-                    setState(() => editablePoints[_activePointIndex!] = Offset((editablePoints[_activePointIndex!].dx + delta.dx).clamp(0.0, imgW), (editablePoints[_activePointIndex!].dy + delta.dy).clamp(0.0, imgH)));
-                  } : null,
-                  onPanEnd: _isEditMode ? (_) { if (_activePointIndex != null) { _recordHistory(); setState(() => _activePointIndex = null); } } : null,
-                  onTapUp: _isEditMode ? (d) {
-                    if (_findNearestPoint(d.localPosition, baseScale) == null) {
-                      setState(() => editablePoints.add(Offset((d.localPosition / baseScale).dx.clamp(0.0, imgW), (d.localPosition / baseScale).dy.clamp(0.0, imgH))));
-                      _recordHistory();
-                    }
-                  } : null,
-                  onLongPressStart: _isEditMode ? (d) {
-                    final i = _findNearestPoint(d.localPosition, baseScale);
-                    if (i != null) { setState(() { editablePoints.removeAt(i); _activePointIndex = null; }); _recordHistory(); }
-                  } : null,
-                  child: Stack(
-                    children: [
-                      Positioned.fill(child: RawImage(image: _loadedImage, fit: BoxFit.contain)),
-                      Positioned.fill(child: CustomPaint(painter: _InvariantPainter(points: editablePoints, baseScale: baseScale, zoomLevel: _currentScale, activeIndex: _activePointIndex, isEditMode: _isEditMode))),
-                    ],
-                  ),
+
+      body: Column(
+        children: [
+          // --- YENİ EKLENEN ÜST BAR (Sadece NIfTI ise görünür) ---
+          if (widget.isNiftiMode)
+            Container(
+              color: Colors.black87,
+              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _buildAxisButton('axial', 'Üstten'),
+                    const SizedBox(width: 8),
+                    _buildAxisButton('coronal', 'Önden'),
+                    const SizedBox(width: 8),
+                    _buildAxisButton('sagittal', 'Yandan'),
+                    const SizedBox(width: 16),
+                    ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.orange, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8), minimumSize: Size.zero),
+                      icon: const Icon(Icons.view_in_ar, size: 16),
+                      label: const Text('3D Gör', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                      onPressed: _open3DViewer,
+                    ),
+                  ],
                 ),
               ),
             ),
-          );
-        },
+
+          // --- MEVCUT GÖRÜNTÜ ALANI ---
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final double baseScale = (constraints.maxWidth / imgW < constraints.maxHeight / imgH) ? constraints.maxWidth / imgW : constraints.maxHeight / imgH;
+                return Center(
+                  child: InteractiveViewer(
+                    transformationController: _transformationController,
+                    minScale: 0.1, maxScale: 20.0, panEnabled: !_isEditMode,
+                    child: SizedBox(
+                      width: imgW * baseScale, height: imgH * baseScale,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.translucent,
+                        onPanStart: _isEditMode ? (d) { final i = _findNearestPoint(d.localPosition, baseScale); if (i != null) setState(() => _activePointIndex = i); } : null,
+                        onPanUpdate: (_isEditMode && _activePointIndex != null) ? (d) {
+                          final delta = d.delta / baseScale / _currentScale;
+                          setState(() => editablePoints[_activePointIndex!] = Offset((editablePoints[_activePointIndex!].dx + delta.dx).clamp(0.0, imgW), (editablePoints[_activePointIndex!].dy + delta.dy).clamp(0.0, imgH)));
+                        } : null,
+                        onPanEnd: _isEditMode ? (_) { if (_activePointIndex != null) { _recordHistory(); setState(() => _activePointIndex = null); } } : null,
+                        onTapUp: _isEditMode ? (d) {
+                          if (_findNearestPoint(d.localPosition, baseScale) == null) {
+                            setState(() => editablePoints.add(Offset((d.localPosition / baseScale).dx.clamp(0.0, imgW), (d.localPosition / baseScale).dy.clamp(0.0, imgH))));
+                            _recordHistory();
+                          }
+                        } : null,
+                        onLongPressStart: _isEditMode ? (d) {
+                          final i = _findNearestPoint(d.localPosition, baseScale);
+                          if (i != null) { setState(() { editablePoints.removeAt(i); _activePointIndex = null; }); _recordHistory(); }
+                        } : null,
+                        child: Stack(
+                          children: [
+                            Positioned.fill(child: RawImage(image: _loadedImage, fit: BoxFit.contain)),
+                            Positioned.fill(child: CustomPaint(painter: _InvariantPainter(points: editablePoints, baseScale: baseScale, zoomLevel: _currentScale, activeIndex: _activePointIndex, isEditMode: _isEditMode))),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+
+          // --- EKSİK OLAN ALT BAR BURASI (SLIDER VE OKLAR) ---
+          if (widget.isNiftiMode && _totalSlices > 0)
+            Container(
+              color: Colors.black87,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              child: Column(
+                children: [
+                  Text("Kesit: $_currentSliceIndex / ${_totalSlices - 1}", style: const TextStyle(color: Colors.white)),
+                  Row(
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.arrow_back_ios, color: Colors.orange, size: 20),
+                        onPressed: () => _changeSlice(-1),
+                      ),
+                      Expanded(
+                        child: Slider(
+                          value: _currentSliceIndex.toDouble(),
+                          min: 0,
+                          max: (_totalSlices - 1).toDouble(),
+                          activeColor: Colors.orange,
+                          onChanged: (val) {
+                            setState(() { _currentSliceIndex = val.toInt(); });
+                          },
+                          onChangeEnd: (val) async {
+                            int newSlice = val.toInt();
+                            setState(() => _isLoading = true);
+                            await _saveCurrentSliceSilently(); // Slider bırakılınca kaydet
+                            _currentSliceIndex = newSlice;
+                            _currentSliceMap[_activeAxis] = newSlice;
+                            await _fetchSlice(newSlice, _activeAxis); // Yeni resmi getir
+                          },
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.arrow_forward_ios, color: Colors.orange, size: 20),
+                        onPressed: () => _changeSlice(1),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+        ],
       ),
     );
   }
