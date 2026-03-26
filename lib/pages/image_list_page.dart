@@ -192,6 +192,7 @@ class _ImageListPageState extends State<ImageListPage> {
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
                                   // DÜZENLEME BUTONU
+                                  // DÜZENLEME BUTONU
                                   IconButton(
                                     icon: const Icon(Icons.edit, color: Colors.orangeAccent),
                                     onPressed: isNifti ? () {
@@ -204,6 +205,8 @@ class _ImageListPageState extends State<ImageListPage> {
                                             maskId: mask['id'],
                                             token: widget.token,
                                             filename: fileData['filename'],
+                                            // --- İŞTE EKSİK OLAN KRİTİK SATIR BURASI ---
+                                            niftiFilePath: normalizeUrl(fileData['file_path']),
                                           ),
                                         ),
                                       );
