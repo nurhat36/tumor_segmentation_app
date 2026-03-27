@@ -280,14 +280,17 @@ class _SegmentPageState extends State<SegmentPage> {
   // 🖼️ GÖRÜNTÜ VE MASKE İŞLEME
   // ============================================================
 
-  Future<void> loadMaskImage(Uint8List bytes) async {
+  Future<void> loadMaskImage(Uint8List bytes, {bool recalculateContour = true}) async {
     final codec = await ui.instantiateImageCodec(bytes);
     final frame = await codec.getNextFrame();
 
     setState(() {
       maskImage = frame.image;
-      _findSimplifiedContour();
     });
+
+    if (recalculateContour) {
+      _findSimplifiedContour();
+    }
   }
 
   void _findSimplifiedContour() async {
@@ -362,9 +365,17 @@ class _SegmentPageState extends State<SegmentPage> {
       }
 
       final simplifiedContour = <Offset>[];
-      final samplingRate = 20; // Biraz daha hassas olsun diye 50 yerine 20 yaptım
-      for (int k = 0; k < currentPath.length; k += samplingRate) {
-        simplifiedContour.add(currentPath[k]);
+      if (currentPath.isNotEmpty) {
+        simplifiedContour.add(currentPath.first);
+        Offset lastAdded = currentPath.first;
+
+        for (int k = 1; k < currentPath.length; k++) {
+          // İki nokta arası mesafe 25 pikselden büyükse yeni nokta ekle (ideal sayıyı bulmak için bu 25 değerini 20 veya 30 yapabilirsin)
+          if ((currentPath[k] - lastAdded).distance >= 30.0) {
+            simplifiedContour.add(currentPath[k]);
+            lastAdded = currentPath[k];
+          }
+        }
       }
       if (simplifiedContour.isNotEmpty) maskContours = [simplifiedContour];
 
@@ -603,11 +614,65 @@ class _SegmentPageState extends State<SegmentPage> {
     } catch (e) { return false; }
   }
 
+
+
   // Manuel Çizim Oluşturma (Create)
-  Future<bool> _createManualMaskOnServer() async {
-    // ... (Mevcut kodun aynısı) ...
-    // Kısaltma: Logiği aynı tutuyoruz
-    return false;
+  Future<bool> _createManualMaskOnServer(Uint8List maskBytes) async {
+    int? fileIdToSegment = currentFileId;
+
+    if (fileIdToSegment == null) {
+      if (selectedFile == null) return false;
+      try {
+        var uploadReq = http.MultipartRequest('POST', Uri.parse('$baseUrl/files/${widget.patientId}'));
+        uploadReq.headers['Authorization'] = 'Bearer ${widget.token}';
+        uploadReq.files.add(await http.MultipartFile.fromPath('file', selectedFile!.path));
+
+        var uploadRes = await uploadReq.send();
+        if (uploadRes.statusCode == 200) {
+          final resData = json.decode(await uploadRes.stream.bytesToString());
+          fileIdToSegment = resData['id'];
+          setState(() { currentFileId = fileIdToSegment; });
+        } else {
+          print("🛑 HATA (Dosya Yükleme): Sunucu ${uploadRes.statusCode} döndürdü.");
+          return false;
+        }
+      } catch (e) {
+        print("🛑 HATA (Dosya Yükleme Catch): $e");
+        return false;
+      }
+    }
+
+    try {
+      // DİKKAT: C# API'ndeki rotan tam olarak bu mu? Kontrol et!
+      final url = '$baseUrl/segment/manual/$fileIdToSegment';
+      print("🚀 İstek atılıyor: POST $url");
+
+      var request = http.MultipartRequest('POST', Uri.parse(url));
+      request.headers['Authorization'] = 'Bearer ${widget.token}';
+      request.files.add(http.MultipartFile.fromBytes('mask_file', maskBytes, filename: 'manual_mask.png'));
+
+      var response = await request.send();
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        final responseBody = await http.Response.fromStream(response);
+        final responseData = json.decode(responseBody.body);
+
+        setState(() {
+          currentMaskId = responseData['mask_id'] ?? responseData['id'];
+        });
+        print("✅ Manuel maske başarıyla kaydedildi! Mask ID: $currentMaskId");
+        return true;
+      } else {
+        // SUNUCUNUN NE HATA VERDİĞİNİ OKUYORUZ
+        final errBody = await response.stream.bytesToString();
+        print("🛑 HATA (Manuel Maske Kayıt): Sunucu ${response.statusCode} döndürdü.");
+        print("🛑 Sunucudan Gelen Cevap: $errBody");
+        return false;
+      }
+    } catch (e) {
+      print("🛑 HATA (Manuel Kayıt Catch): $e");
+      return false;
+    }
   }
 
   // Ekrana Çizdirme ve Güncelleme
@@ -665,21 +730,42 @@ class _SegmentPageState extends State<SegmentPage> {
       final editedPoints = result['points'] as List<Offset>;
       final maskBytes = result['maskBytes'] as Uint8List; // Hazır Siyah Beyaz Maske!
 
-      // Ekranda maskeyi hemen güncelle
-      await loadMaskImage(maskBytes);
-      setState(() => maskContours = [editedPoints]);
+
+      // Ekranda maskeyi hemen güncelle ama algoritmayı ÇALIŞTIRMA
+      await loadMaskImage(maskBytes, recalculateContour: false);
+      setState(() => maskContours = [editedPoints]); // Kusursuz el çizimi noktalarını koru
 
       // Server'a yolla
       bool success;
       if (isNiftiMode) {
         success = await _updateNiftiSliceOnServer(currentMaskId!, currentSliceIndex);
       } else {
-        // Normal mod için direkt elimizdeki maskBytes'ı yollayabiliriz
-        var request = http.MultipartRequest('PUT', Uri.parse('$baseUrl/segment/$currentMaskId'));
+        // ID YOKSA GÜNCELLEME YAPAMAYIZ
+        if (currentMaskId == null) {
+          print("🛑 HATA: Güncellenecek maske ID'si bulunamadı.");
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Önce maskenin oluşturulması gerekiyor!")));
+          return;
+        }
+
+        final url = '$baseUrl/segment/$currentMaskId';
+        print("🚀 İstek atılıyor: PUT $url");
+
+        var request = http.MultipartRequest('PUT', Uri.parse(url));
         request.headers['Authorization'] = 'Bearer ${widget.token}';
+
+        // DİKKAT: Burası sunucunun beklediği gibi 'file' olmak ZORUNDA
         request.files.add(http.MultipartFile.fromBytes('file', maskBytes, filename: 'updated_mask.png'));
+
         var response = await request.send();
-        success = response.statusCode == 200;
+        success = response.statusCode == 200 || response.statusCode == 201;
+
+        if (!success) {
+          final errBody = await response.stream.bytesToString();
+          print("🛑 HATA (Maske Güncelleme): Sunucu ${response.statusCode} döndürdü.");
+          print("🛑 Sunucudan Gelen Cevap: $errBody");
+        } else {
+          print("✅ Maske başarıyla güncellendi!");
+        }
       }
 
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(success ? "Kaydedildi" : "Hata oluştu")));
@@ -715,11 +801,9 @@ class _SegmentPageState extends State<SegmentPage> {
 
       if (manualPoints.isEmpty) return; // Çizgi çizmeden kaydettiyse işlem yapma
 
-      // 3. Üretilen siyah/beyaz maskeyi beklemeden ekranda göster
-      await loadMaskImage(maskBytes);
-      setState(() {
-        maskContours = [manualPoints];
-      });
+      // Ekranda maskeyi hemen güncelle ama algoritmayı ÇALIŞTIRMA
+      await loadMaskImage(maskBytes, recalculateContour: false);
+      setState(() => maskContours = [manualPoints]); // Kusursuz el çizimi noktalarını koru
 
       // 4. Server'a Kaydetme İşlemi
       bool success = false;
@@ -728,17 +812,27 @@ class _SegmentPageState extends State<SegmentPage> {
           // NIfTI slice güncellemesi
           success = await _updateNiftiSliceOnServer(currentMaskId!, currentSliceIndex);
         } else if (currentMaskId == null) {
-          // İLK DEFA maske oluşturuluyorsa (Backend tarafında POST ile yeni kayıt açılmalı)
-          // Not: Mevcut _createManualMaskOnServer metodunuzu maskBytes alacak şekilde güncellemeniz gerekebilir.
-          // Geçici olarak bu bloğu kendi yapınıza göre uyarlayabilirsiniz:
-          success = await _createManualMaskOnServer();
+          // İLK DEFA maske oluşturuluyorsa (Resim ID yoksa kendi halledecek)
+          success = await _createManualMaskOnServer(maskBytes);
         } else {
           // Var olan maskeyi manuel çizimle GÜNCELLEME
+          print("🚀 İstek atılıyor: PUT $baseUrl/segment/$currentMaskId");
           var request = http.MultipartRequest('PUT', Uri.parse('$baseUrl/segment/$currentMaskId'));
           request.headers['Authorization'] = 'Bearer ${widget.token}';
+
+          // DİKKAT: Burası da sunucunun beklediği gibi 'file' olacak
           request.files.add(http.MultipartFile.fromBytes('file', maskBytes, filename: 'manual_mask.png'));
+
           var response = await request.send();
-          success = response.statusCode == 200;
+          success = response.statusCode == 200 || response.statusCode == 201;
+
+          if (!success) {
+            final errBody = await response.stream.bytesToString();
+            print("🛑 HATA (Manuel Çizim Üzerine Ekleme): Sunucu ${response.statusCode} döndürdü.");
+            print("🛑 Sunucudan Gelen Cevap: $errBody");
+          } else {
+            print("✅ Manuel maske başarıyla güncellendi!");
+          }
         }
       } catch (e) {
         print("Manuel çizim kaydetme hatası: $e");
