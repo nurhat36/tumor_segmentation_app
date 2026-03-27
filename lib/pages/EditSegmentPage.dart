@@ -181,7 +181,18 @@ class _EditSegmentPageState extends State<EditSegmentPage> {
     }
 
     final simplified = <Offset>[];
-    for (int k = 0; k < currentPath.length; k += 20) simplified.add(currentPath[k]);
+    if (currentPath.isNotEmpty) {
+      simplified.add(currentPath.first);
+      Offset lastAdded = currentPath.first;
+
+      for (int i = 1; i < currentPath.length; i++) {
+        // İki nokta arasındaki mesafe 25 pikselden (veya 30) büyükse yeni nokta ekle
+        if ((currentPath[i] - lastAdded).distance >= 25.0) {
+          simplified.add(currentPath[i]);
+          lastAdded = currentPath[i];
+        }
+      }
+    }
     return simplified;
   }
 
@@ -540,9 +551,10 @@ class _InvariantPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     if (points.isEmpty) return;
-    final stroke = 1.5 / baseScale / zoomLevel;
-    final dotRadius = (isEditMode ? 3.0 : 1.5) / baseScale / zoomLevel;
-    final activeRadius = 5.0 / baseScale / zoomLevel;
+    // SegmentPage ile birebir aynı görünecek sabit değerler:
+    final stroke = 2.0; // SegmentPage'deki çizgi kalınlığı
+    final dotRadius = 2.5; // SegmentPage'deki standart nokta büyüklüğü
+    final activeRadius = 4.0; // Edit modunda seçili/tutulan nokta biraz daha büyük olsun
 
     final fillPaint = Paint()..color = isEditMode ? Colors.blue.withOpacity(0.20) : Colors.white.withOpacity(0.05)..style = PaintingStyle.fill;
     final linePaint = Paint()..color = isEditMode ? Colors.blueAccent : Colors.greenAccent..style = PaintingStyle.stroke..strokeWidth = stroke..isAntiAlias = true;
